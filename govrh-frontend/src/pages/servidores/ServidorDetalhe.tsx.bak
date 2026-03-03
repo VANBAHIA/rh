@@ -1,0 +1,722 @@
+import { useState, useEffect, useCallback } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import {
+  ArrowLeft, Edit, Printer, Plus, Trash2, Star, StarOff,
+  Phone, Mail, MapPin, Briefcase, Clock, ChevronRight,
+  Loader2, AlertCircle, Check, X, Save,
+} from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
+import { servidoresApi } from '@/services/servidores'
+import { SituacaoBadge } from '@/components/servidores/SituacaoBadge'
+import { formatCPF, formatDate, formatCurrency, cn } from '@/lib/utils'
+import { extractApiError } from '@/services/api'
+import { toast } from '@/hooks/useToast'
+
+// ── Tipos ──────────────────────────────────────────────────────────────────
+
+interface Contato {
+  id: string
+  tipo: string
+  valor: string
+  principal: boolean
+  ativo: boolean
+}
+
+interface Endereco {
+  id: string
+  cep?: string
+  logradouro: string
+  numero: string
+  complemento?: string
+  bairro: string
+  municipio: string
+  uf: string
+  principal: boolean
+  ativo: boolean
+}
+
+interface VinculoFuncional {
+  id: string
+  regimeJuridico: string
+  situacaoFuncional: string
+  cargoId: string
+  lotacaoId: string
+  cargaHoraria: number
+  turno: string
+  nivelTitulacao?: string
+  titulacaoComprovada?: string
+  dataAdmissao: string
+  dataPosse?: string
+  dataExercicio?: string
+  atual: boolean
+  tipoAlteracao: string
+  cargo?: { nome: string; codigo: string }
+  lotacao?: { nome: string; sigla: string }
+  nivelSalarial?: { nivel: string; classe: string; vencimentoBase: number }
+  tabelaSalarial?: { nome: string }
+}
+
+interface Servidor {
+  id: string
+  matricula: string
+  nome: string
+  nomeSocial?: string
+  cpf: string
+  dataNascimento: string
+  sexo: string
+  estadoCivil?: string
+  escolaridade?: string
+  fotoUrl?: string
+  vinculos: VinculoFuncional[]
+  contatos: Contato[]
+  enderecos: Endereco[]
+}
+
+// ── Labels ─────────────────────────────────────────────────────────────────
+
+const TIPO_CONTATO_LABELS: Record<string, string> = {
+  EMAIL_PESSOAL:       'E-mail pessoal',
+  EMAIL_INSTITUCIONAL: 'E-mail institucional',
+  CELULAR:             'Celular',
+  TELEFONE_FIXO:       'Telefone fixo',
+  WHATSAPP:            'WhatsApp',
+}
+
+const TIPO_CONTATO_ICON: Record<string, React.ElementType> = {
+  EMAIL_PESSOAL:       Mail,
+  EMAIL_INSTITUCIONAL: Mail,
+  CELULAR:             Phone,
+  TELEFONE_FIXO:       Phone,
+  WHATSAPP:            Phone,
+}
+
+const REGIME_LABELS: Record<string, string> = {
+  ESTATUTARIO:   'Estatutário',
+  CELETISTA:     'CLT',
+  COMISSIONADO:  'Comissionado',
+  ESTAGIARIO:    'Estagiário',
+  TEMPORARIO:    'Temporário',
+  AGENTE_POLITICO: 'Agente Político',
+}
+
+const TURNO_LABELS: Record<string, string> = {
+  MANHA:        'Manhã',
+  TARDE:        'Tarde',
+  NOITE:        'Noite',
+  INTEGRAL:     'Integral',
+  PLANTAO_12x36: '12×36',
+}
+
+// ── Componente: Lista de Contatos ──────────────────────────────────────────
+
+function ContatosPanel({ servidorId }: { servidorId: string }) {
+  const [contatos, setContatos] = useState<Contato[]>([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [showForm, setShowForm] = useState(false)
+  const [editId, setEditId] = useState<string | null>(null)
+  const [form, setForm] = useState({ tipo: 'CELULAR', valor: '', principal: false })
+
+  const fetch = useCallback(async () => {
+    try {
+      const { data: res } = await servidoresApi.listarContatos(servidorId)
+      setContatos((res as any).data ?? res ?? [])
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Erro', description: extractApiError(err) })
+    } finally { setLoading(false) }
+  }, [servidorId])
+
+  useEffect(() => { fetch() }, [fetch])
+
+  const resetForm = () => { setForm({ tipo: 'CELULAR', valor: '', principal: false }); setEditId(null); setShowForm(false) }
+
+  const handleSave = async () => {
+    if (!form.valor.trim()) return
+    setSaving(true)
+    try {
+      if (editId) {
+        await servidoresApi.atualizarContato(servidorId, editId, form)
+        toast({ title: 'Contato atualizado.' })
+      } else {
+        await servidoresApi.criarContato(servidorId, form)
+        toast({ title: 'Contato adicionado.' })
+      }
+      resetForm()
+      fetch()
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Erro', description: extractApiError(err) })
+    } finally { setSaving(false) }
+  }
+
+  const handleRemover = async (id: string) => {
+    if (!confirm('Remover este contato?')) return
+    try {
+      await servidoresApi.removerContato(servidorId, id)
+      toast({ title: 'Contato removido.' })
+      fetch()
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Erro', description: extractApiError(err) })
+    }
+  }
+
+  const handleSetPrincipal = async (id: string) => {
+    try {
+      await servidoresApi.atualizarContato(servidorId, id, { principal: true })
+      fetch()
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Erro', description: extractApiError(err) })
+    }
+  }
+
+  const startEdit = (c: Contato) => {
+    setForm({ tipo: c.tipo, valor: c.valor, principal: c.principal })
+    setEditId(c.id)
+    setShowForm(true)
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Lista */}
+      {loading ? (
+        <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-12 w-full rounded-lg" />)}</div>
+      ) : contatos.length === 0 && !showForm ? (
+        <div className="text-center py-8 text-muted-foreground border-2 border-dashed border-border rounded-xl">
+          <Phone className="w-8 h-8 mx-auto mb-2 opacity-30" />
+          <p className="text-sm">Nenhum contato cadastrado</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {contatos.map((c) => {
+            const Icon = TIPO_CONTATO_ICON[c.tipo] ?? Phone
+            const isEditing = editId === c.id && showForm
+            return (
+              <div
+                key={c.id}
+                className={cn(
+                  'flex items-center gap-3 px-4 py-3 rounded-xl border transition-all',
+                  c.principal
+                    ? 'bg-gov-50 border-gov-200'
+                    : 'bg-card border-border hover:bg-muted/30',
+                )}
+              >
+                <div className={cn('p-2 rounded-lg shrink-0', c.principal ? 'bg-gov-100 text-gov-700' : 'bg-muted text-muted-foreground')}>
+                  <Icon className="w-3.5 h-3.5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-muted-foreground">
+                    {TIPO_CONTATO_LABELS[c.tipo] ?? c.tipo}
+                    {c.principal && <span className="ml-2 text-[10px] text-gov-600 font-semibold uppercase tracking-wide">Principal</span>}
+                  </p>
+                  <p className="text-sm font-medium text-foreground">{c.valor}</p>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  {!c.principal && (
+                    <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-amber-500" title="Definir como principal" onClick={() => handleSetPrincipal(c.id)}>
+                      <StarOff className="w-3.5 h-3.5" />
+                    </Button>
+                  )}
+                  <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={() => startEdit(c)}>
+                    <Edit className="w-3.5 h-3.5" />
+                  </Button>
+                  <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-red-500" onClick={() => handleRemover(c.id)}>
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Formulário inline */}
+      {showForm && (
+        <div className="border border-gov-200 bg-gov-50/50 rounded-xl p-4 space-y-3">
+          <p className="text-xs font-semibold text-foreground">{editId ? 'Editar contato' : 'Novo contato'}</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Tipo</label>
+              <select
+                value={form.tipo}
+                onChange={(e) => setForm((f) => ({ ...f, tipo: e.target.value }))}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              >
+                {Object.entries(TIPO_CONTATO_LABELS).map(([v, l]) => (
+                  <option key={v} value={v}>{l}</option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Valor</label>
+              <input
+                type="text"
+                value={form.valor}
+                onChange={(e) => setForm((f) => ({ ...f, valor: e.target.value }))}
+                placeholder="Ex: (11) 99999-9999"
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+            </div>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer text-sm text-foreground select-none">
+            <input type="checkbox" checked={form.principal} onChange={(e) => setForm((f) => ({ ...f, principal: e.target.checked }))} className="rounded" />
+            Definir como contato principal
+          </label>
+          <div className="flex gap-2 justify-end">
+            <Button variant="outline" size="sm" onClick={resetForm}><X className="w-3.5 h-3.5 mr-1.5" />Cancelar</Button>
+            <Button variant="gov" size="sm" onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Save className="w-3.5 h-3.5 mr-1.5" />}
+              Salvar
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {!showForm && (
+        <Button variant="outline" size="sm" className="w-full border-dashed" onClick={() => { setEditId(null); setForm({ tipo: 'CELULAR', valor: '', principal: false }); setShowForm(true) }}>
+          <Plus className="w-3.5 h-3.5 mr-2" />Adicionar contato
+        </Button>
+      )}
+    </div>
+  )
+}
+
+// ── Componente: Lista de Endereços ─────────────────────────────────────────
+
+function EnderecosPanel({ servidorId }: { servidorId: string }) {
+  const [enderecos, setEnderecos] = useState<Endereco[]>([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [showForm, setShowForm] = useState(false)
+  const [editId, setEditId] = useState<string | null>(null)
+  const emptyForm = { cep: '', logradouro: '', numero: '', complemento: '', bairro: '', municipio: '', uf: '', principal: false }
+  const [form, setForm] = useState(emptyForm)
+
+  const fetch = useCallback(async () => {
+    try {
+      const { data: res } = await servidoresApi.listarEnderecos(servidorId)
+      setEnderecos((res as any).data ?? res ?? [])
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Erro', description: extractApiError(err) })
+    } finally { setLoading(false) }
+  }, [servidorId])
+
+  useEffect(() => { fetch() }, [fetch])
+
+  const resetForm = () => { setForm(emptyForm); setEditId(null); setShowForm(false) }
+
+  const handleSave = async () => {
+    if (!form.logradouro || !form.numero || !form.municipio || !form.uf) {
+      toast({ variant: 'destructive', title: 'Preencha os campos obrigatórios' })
+      return
+    }
+    setSaving(true)
+    try {
+      if (editId) {
+        await servidoresApi.atualizarEndereco(servidorId, editId, form)
+        toast({ title: 'Endereço atualizado.' })
+      } else {
+        await servidoresApi.criarEndereco(servidorId, form)
+        toast({ title: 'Endereço adicionado.' })
+      }
+      resetForm(); fetch()
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Erro', description: extractApiError(err) })
+    } finally { setSaving(false) }
+  }
+
+  const handleRemover = async (id: string) => {
+    if (!confirm('Remover este endereço?')) return
+    try {
+      await servidoresApi.removerEndereco(servidorId, id)
+      toast({ title: 'Endereço removido.' })
+      fetch()
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Erro', description: extractApiError(err) })
+    }
+  }
+
+  const handleSetPrincipal = async (id: string) => {
+    try {
+      await servidoresApi.atualizarEndereco(servidorId, id, { principal: true })
+      fetch()
+    } catch (err) {
+      toast({ variant: 'destructive', title: 'Erro', description: extractApiError(err) })
+    }
+  }
+
+  const startEdit = (e: Endereco) => {
+    setForm({ cep: e.cep ?? '', logradouro: e.logradouro, numero: e.numero, complemento: e.complemento ?? '', bairro: e.bairro, municipio: e.municipio, uf: e.uf, principal: e.principal })
+    setEditId(e.id); setShowForm(true)
+  }
+
+  const buscarCep = async (cep: string) => {
+    const digits = cep.replace(/\D/g, '')
+    if (digits.length !== 8) return
+    try {
+      const r = await fetch(`https://viacep.com.br/ws/${digits}/json/`)
+      const d = await (r as any).json()
+      if (!d.erro) setForm((f) => ({ ...f, logradouro: d.logradouro, bairro: d.bairro, municipio: d.localidade, uf: d.uf }))
+    } catch { /* silencioso */ }
+  }
+
+  return (
+    <div className="space-y-3">
+      {loading ? (
+        <div className="space-y-2">{Array.from({ length: 2 }).map((_, i) => <Skeleton key={i} className="h-20 w-full rounded-lg" />)}</div>
+      ) : enderecos.length === 0 && !showForm ? (
+        <div className="text-center py-8 text-muted-foreground border-2 border-dashed border-border rounded-xl">
+          <MapPin className="w-8 h-8 mx-auto mb-2 opacity-30" />
+          <p className="text-sm">Nenhum endereço cadastrado</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {enderecos.map((e) => (
+            <div
+              key={e.id}
+              className={cn(
+                'relative px-4 py-3 rounded-xl border transition-all',
+                e.principal ? 'bg-gov-50 border-gov-200' : 'bg-card border-border hover:bg-muted/30',
+              )}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-start gap-3 flex-1 min-w-0">
+                  <div className={cn('p-2 rounded-lg mt-0.5 shrink-0', e.principal ? 'bg-gov-100 text-gov-700' : 'bg-muted text-muted-foreground')}>
+                    <MapPin className="w-3.5 h-3.5" />
+                  </div>
+                  <div className="min-w-0">
+                    {e.principal && <span className="text-[10px] text-gov-600 font-semibold uppercase tracking-wide">Principal</span>}
+                    <p className="text-sm font-medium text-foreground leading-snug">
+                      {e.logradouro}, {e.numero}{e.complemento ? `, ${e.complemento}` : ''}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {e.bairro} · {e.municipio}/{e.uf}{e.cep ? ` · CEP ${e.cep}` : ''}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  {!e.principal && (
+                    <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-amber-500" title="Definir como principal" onClick={() => handleSetPrincipal(e.id)}>
+                      <StarOff className="w-3.5 h-3.5" />
+                    </Button>
+                  )}
+                  <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-foreground" onClick={() => startEdit(e)}>
+                    <Edit className="w-3.5 h-3.5" />
+                  </Button>
+                  <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-red-500" onClick={() => handleRemover(e.id)}>
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Formulário inline */}
+      {showForm && (
+        <div className="border border-gov-200 bg-gov-50/50 rounded-xl p-4 space-y-3">
+          <p className="text-xs font-semibold text-foreground">{editId ? 'Editar endereço' : 'Novo endereço'}</p>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">CEP</label>
+              <input type="text" value={form.cep} onChange={(e) => setForm((f) => ({ ...f, cep: e.target.value }))}
+                onBlur={(e) => buscarCep(e.target.value)} placeholder="00000-000" maxLength={9}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
+            </div>
+            <div className="col-span-2 space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Logradouro *</label>
+              <input type="text" value={form.logradouro} onChange={(e) => setForm((f) => ({ ...f, logradouro: e.target.value }))}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Número *</label>
+              <input type="text" value={form.numero} onChange={(e) => setForm((f) => ({ ...f, numero: e.target.value }))}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
+            </div>
+            <div className="col-span-2 space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Complemento</label>
+              <input type="text" value={form.complemento} onChange={(e) => setForm((f) => ({ ...f, complemento: e.target.value }))}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Bairro</label>
+              <input type="text" value={form.bairro} onChange={(e) => setForm((f) => ({ ...f, bairro: e.target.value }))}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">Município *</label>
+              <input type="text" value={form.municipio} onChange={(e) => setForm((f) => ({ ...f, municipio: e.target.value }))}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
+            </div>
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-muted-foreground">UF *</label>
+              <input type="text" value={form.uf} onChange={(e) => setForm((f) => ({ ...f, uf: e.target.value.toUpperCase() }))}
+                maxLength={2} placeholder="SP"
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring" />
+            </div>
+          </div>
+          <label className="flex items-center gap-2 cursor-pointer text-sm text-foreground select-none">
+            <input type="checkbox" checked={form.principal} onChange={(e) => setForm((f) => ({ ...f, principal: e.target.checked }))} className="rounded" />
+            Definir como endereço principal
+          </label>
+          <div className="flex gap-2 justify-end">
+            <Button variant="outline" size="sm" onClick={resetForm}><X className="w-3.5 h-3.5 mr-1.5" />Cancelar</Button>
+            <Button variant="gov" size="sm" onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Save className="w-3.5 h-3.5 mr-1.5" />}
+              Salvar
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {!showForm && (
+        <Button variant="outline" size="sm" className="w-full border-dashed" onClick={() => { setEditId(null); setForm(emptyForm); setShowForm(true) }}>
+          <Plus className="w-3.5 h-3.5 mr-2" />Adicionar endereço
+        </Button>
+      )}
+    </div>
+  )
+}
+
+// ── Componente: Vínculo Funcional Card ─────────────────────────────────────
+
+function VinculoCard({ vinculo, atual }: { vinculo: VinculoFuncional; atual: boolean }) {
+  return (
+    <div className={cn('rounded-xl border p-4 space-y-3 transition-all', atual ? 'border-gov-300 bg-gov-50/60' : 'border-border bg-muted/20')}>
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {atual && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-emerald-100 text-emerald-700 border border-emerald-200">
+                <Check className="w-2.5 h-2.5" />Atual
+              </span>
+            )}
+            <span className="text-xs font-medium text-muted-foreground">{REGIME_LABELS[vinculo.regimeJuridico] ?? vinculo.regimeJuridico}</span>
+            {vinculo.nivelTitulacao && (
+              <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-indigo-100 text-indigo-700 border border-indigo-200">
+                Nível {vinculo.nivelTitulacao}
+              </span>
+            )}
+          </div>
+          <p className="text-sm font-semibold text-foreground mt-1">
+            {vinculo.cargo?.nome ?? '—'}
+            {vinculo.nivelSalarial && (
+              <span className="text-muted-foreground font-normal"> · Classe {vinculo.nivelSalarial.classe}</span>
+            )}
+          </p>
+          <p className="text-xs text-muted-foreground">{vinculo.lotacao?.nome ?? '—'}</p>
+        </div>
+        {vinculo.nivelSalarial && (
+          <div className="text-right shrink-0">
+            <p className="text-xs text-muted-foreground">Vencimento base</p>
+            <p className="text-sm font-semibold font-mono text-foreground">{formatCurrency(vinculo.nivelSalarial.vencimentoBase)}</p>
+          </div>
+        )}
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2 border-t border-border/50">
+        {[
+          { label: 'Admissão', value: formatDate(vinculo.dataAdmissao) },
+          { label: 'Posse', value: vinculo.dataPosse ? formatDate(vinculo.dataPosse) : '—' },
+          { label: 'Exercício', value: vinculo.dataExercicio ? formatDate(vinculo.dataExercicio) : '—' },
+          { label: 'Carga horária', value: `${vinculo.cargaHoraria}h · ${TURNO_LABELS[vinculo.turno] ?? vinculo.turno}` },
+        ].map(({ label, value }) => (
+          <div key={label}>
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">{label}</p>
+            <p className="text-xs text-foreground mt-0.5">{value}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── Página principal ───────────────────────────────────────────────────────
+
+type Tab = 'pessoal' | 'funcional' | 'contatos' | 'enderecos'
+
+export default function ServidorDetalhe() {
+  const { id } = useParams<{ id: string }>()
+  const navigate = useNavigate()
+  const [servidor, setServidor] = useState<Servidor | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [activeTab, setActiveTab] = useState<Tab>('funcional')
+
+  useEffect(() => {
+    if (!id) return
+    servidoresApi.obter(id)
+      .then(({ data: res }) => setServidor((res as any).data ?? res))
+      .catch((err) => toast({ variant: 'destructive', title: 'Erro', description: extractApiError(err) }))
+      .finally(() => setLoading(false))
+  }, [id])
+
+  const vinculoAtual = servidor?.vinculos.find((v) => v.atual)
+  const vinculosAnteriores = servidor?.vinculos.filter((v) => !v.atual) ?? []
+
+  const initials = servidor?.nome
+    .split(' ').filter(Boolean).slice(0, 2)
+    .map((n) => n[0]).join('').toUpperCase() ?? '?'
+
+  const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
+    { id: 'funcional',  label: 'Dados Funcionais', icon: Briefcase },
+    { id: 'pessoal',    label: 'Dados Pessoais',   icon: Clock },
+    { id: 'contatos',   label: 'Contatos',          icon: Phone },
+    { id: 'enderecos',  label: 'Endereços',         icon: MapPin },
+  ]
+
+  return (
+    <div className="space-y-5 animate-fade-in max-w-5xl">
+      {/* Toolbar */}
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <Button variant="ghost" size="sm" onClick={() => navigate('/servidores')} className="-ml-2 text-muted-foreground">
+          <ArrowLeft className="w-4 h-4 mr-2" />Voltar
+        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => window.print()}>
+            <Printer className="w-4 h-4 mr-2" />Imprimir
+          </Button>
+          {id && (
+            <Button variant="gov" size="sm" onClick={() => navigate(`/servidores/${id}/editar`)}>
+              <Edit className="w-4 h-4 mr-2" />Editar
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {/* Header card */}
+      {loading ? (
+        <div className="bg-card border border-border rounded-2xl p-6 flex gap-5">
+          <Skeleton className="w-20 h-20 rounded-2xl shrink-0" />
+          <div className="space-y-2 flex-1">
+            <Skeleton className="h-6 w-64" />
+            <Skeleton className="h-4 w-40" />
+            <Skeleton className="h-4 w-32" />
+          </div>
+        </div>
+      ) : servidor ? (
+        <div className="bg-card border border-border rounded-2xl overflow-hidden">
+          <div className="flex items-start gap-5 p-6">
+            {/* Avatar */}
+            <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-gov-600 to-indigo-700 flex items-center justify-center text-white text-2xl font-bold font-display shrink-0 shadow-lg">
+              {initials}
+            </div>
+            {/* Info principal */}
+            <div className="flex-1 min-w-0">
+              <div className="flex items-start gap-3 flex-wrap">
+                <div>
+                  <h1 className="text-xl font-semibold text-foreground">{servidor.nome}</h1>
+                  {servidor.nomeSocial && (
+                    <p className="text-sm text-muted-foreground">Nome social: {servidor.nomeSocial}</p>
+                  )}
+                </div>
+                {vinculoAtual && <SituacaoBadge situacao={vinculoAtual.situacaoFuncional as any} />}
+              </div>
+              <div className="flex flex-wrap gap-4 mt-3">
+                <div>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">Matrícula</p>
+                  <p className="text-sm font-mono font-semibold text-foreground">{servidor.matricula}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">CPF</p>
+                  <p className="text-sm font-mono text-foreground">{formatCPF(servidor.cpf)}</p>
+                </div>
+                {vinculoAtual && (
+                  <>
+                    <div>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">Cargo</p>
+                      <p className="text-sm text-foreground">{vinculoAtual.cargo?.nome ?? '—'}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">Lotação</p>
+                      <p className="text-sm text-foreground">{vinculoAtual.lotacao?.nome ?? '—'}</p>
+                    </div>
+                    {vinculoAtual.nivelSalarial && (
+                      <div>
+                        <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-semibold">Vencimento</p>
+                        <p className="text-sm font-mono font-semibold text-emerald-700">{formatCurrency(vinculoAtual.nivelSalarial.vencimentoBase)}</p>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <div className="flex border-t border-border overflow-x-auto">
+            {tabs.map(({ id: tabId, label, icon: Icon }) => (
+              <button
+                key={tabId}
+                onClick={() => setActiveTab(tabId)}
+                className={cn(
+                  'flex items-center gap-2 px-5 py-3.5 text-sm font-medium whitespace-nowrap transition-all border-b-2 -mb-px',
+                  activeTab === tabId
+                    ? 'border-gov-600 text-gov-600'
+                    : 'border-transparent text-muted-foreground hover:text-foreground',
+                )}
+              >
+                <Icon className="w-4 h-4" />
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="bg-card border border-border rounded-2xl p-12 text-center text-muted-foreground">
+          <AlertCircle className="w-10 h-10 mx-auto mb-3 opacity-30" />
+          <p>Servidor não encontrado.</p>
+        </div>
+      )}
+
+      {/* Conteúdo das abas */}
+      {!loading && servidor && (
+        <div className="bg-card border border-border rounded-2xl p-6">
+
+          {/* ── Aba: Dados Funcionais ── */}
+          {activeTab === 'funcional' && (
+            <div className="space-y-5">
+              <h2 className="text-sm font-semibold text-foreground">Vínculo Atual</h2>
+              {vinculoAtual
+                ? <VinculoCard vinculo={vinculoAtual} atual={true} />
+                : <p className="text-sm text-muted-foreground italic">Nenhum vínculo ativo.</p>}
+
+              {vinculosAnteriores.length > 0 && (
+                <div className="space-y-3">
+                  <h2 className="text-sm font-semibold text-foreground">Histórico de Vínculos</h2>
+                  {vinculosAnteriores.map((v) => (
+                    <VinculoCard key={v.id} vinculo={v} atual={false} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Aba: Dados Pessoais ── */}
+          {activeTab === 'pessoal' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-8 gap-y-5">
+              {[
+                { label: 'Nome completo',      value: servidor.nome },
+                { label: 'Nome social',        value: servidor.nomeSocial || '—' },
+                { label: 'CPF',                value: formatCPF(servidor.cpf) },
+                { label: 'Data de nascimento', value: formatDate(servidor.dataNascimento) },
+                { label: 'Sexo',               value: servidor.sexo?.replace('_', ' ') || '—' },
+                { label: 'Estado civil',       value: servidor.estadoCivil?.replace('_', ' ') || '—' },
+                { label: 'Escolaridade',       value: servidor.escolaridade?.replace(/_/g, ' ') || '—' },
+              ].map(({ label, value }) => (
+                <div key={label}>
+                  <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">{label}</p>
+                  <p className="text-sm text-foreground mt-0.5">{value}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ── Aba: Contatos ── */}
+          {activeTab === 'contatos' && id && <ContatosPanel servidorId={id} />}
+
+          {/* ── Aba: Endereços ── */}
+          {activeTab === 'enderecos' && id && <EnderecosPanel servidorId={id} />}
+        </div>
+      )}
+    </div>
+  )
+}
