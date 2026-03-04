@@ -1,0 +1,13 @@
+// src/modules/folha/routes.js
+// TODO: Implementar rotas do módulo FOLHA
+const { Router } = require('express');
+const { authenticate, authorize } = require('../../middlewares/auth.middleware');
+
+const router = Router();
+
+// Rotas públicas (apenas transparencia)
+router.use(authenticate);
+
+// TODO: Adicionar rotas específicas do módulo
+
+module.exports = router;
