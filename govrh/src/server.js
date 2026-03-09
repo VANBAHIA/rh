@@ -1,3 +1,9 @@
+// ─── TIMEZONE — deve ser a PRIMEIRA instrução, antes de qualquer require ────
+// O Prisma e o driver MySQL lêem process.env.TZ no momento da importação.
+// Se vier depois do require('./config/prisma'), o timezone já foi fixado errado.
+process.env.TZ = 'UTC';
+// ────────────────────────────────────────────────────────────────────────────
+
 require('dotenv').config();
 const app = require('./app');
 const config = require('./config');
@@ -9,6 +15,7 @@ async function bootstrap() {
   try {
     await prisma.$connect();
     logger.info('Banco de dados conectado.');
+    logger.info(`Timezone do processo: ${process.env.TZ} (${new Date().toISOString()})`);
   } catch (err) {
     logger.error('Falha ao conectar ao banco de dados:', err.message);
     process.exit(1);

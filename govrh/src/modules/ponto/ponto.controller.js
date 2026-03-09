@@ -32,16 +32,18 @@ class PontoController {
   }
   async bater(req, res, next) {
     try {
-      const { servidorId, data, hora } = req.body;
-      const batida = await this.service.bater(req.tenantId, { servidorId, data, hora });
+      // SEGURANÇA: data e hora NÃO são lidas do body — o service usa new Date() do servidor
+      const { servidorId } = req.body;
+      const batida = await this.service.bater(req.tenantId, { servidorId });
       created(res, batida);
     } catch (e) { next(e); }
   }
   // Valida escala e horário ANTES de registrar — chamado pelo terminal de ponto
   async validarBatida(req, res, next) {
     try {
-      const { servidorId, data, hora } = req.body;
-      ok(res, await this.service.validarBatida(req.tenantId, { servidorId, data, hora }));
+      // SEGURANÇA: data e hora NÃO são lidas do body — o service usa new Date() do servidor
+      const { servidorId } = req.body;
+      ok(res, await this.service.validarBatida(req.tenantId, { servidorId }));
     } catch (e) { next(e); }
   }
   async importar(req, res, next) {

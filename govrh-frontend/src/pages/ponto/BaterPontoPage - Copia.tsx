@@ -356,8 +356,6 @@ function PainelValidacao({
 // ─────────────────────────────────────────────────────────────────────────────
 export default function BaterPontoPage() {
   const [dataHora, setDataHora]         = useState(new Date())
-  // offset em ms: diferença entre relógio do servidor e do cliente
-  const serverOffsetRef = useRef<number>(0)
   const [matricula, setMatricula]       = useState('')
   const [servidorNome, setServidorNome] = useState('')
   const [loading, setLoading]           = useState(false)
@@ -378,34 +376,9 @@ export default function BaterPontoPage() {
   const { rostoPresente, skinRatio } = useFacePresence(videoRef, cameraAtiva)
   const { status: serverStatus, latency, recheck, pause: pauseHealthCheck, resume: resumeHealthCheck } = useServerStatus()
 
-  // Relógio sincronizado com o servidor via /api/v1/health/time
-  // Usa ref para o offset — evita re-criar o setInterval a cada mudança
   useEffect(() => {
-    const sincronizar = async () => {
-      try {
-        const t0  = Date.now()
-        const res = await fetch('/api/v1/health/time')
-        const t1  = Date.now()
-        if (res.ok) {
-          const { serverTime } = await res.json()
-          const latenciaMs          = (t1 - t0) / 2
-          serverOffsetRef.current   = new Date(serverTime).getTime() - t1 + latenciaMs
-        }
-      } catch {
-        // falha silenciosa — relógio local como fallback
-      }
-    }
-
-    sincronizar()
-    const syncInterval = setInterval(sincronizar, 5 * 60 * 1000)
-    const tickInterval = setInterval(() => {
-      setDataHora(new Date(Date.now() + serverOffsetRef.current))
-    }, 1000)
-
-    return () => {
-      clearInterval(syncInterval)
-      clearInterval(tickInterval)
-    }
+    const t = setInterval(() => setDataHora(new Date()), 1000)
+    return () => clearInterval(t)
   }, [])
 
   useEffect(() => () => pararCamera(), []) // eslint-disable-line
@@ -535,8 +508,9 @@ export default function BaterPontoPage() {
   const handleValidar = async (mat: string) => {
     setValidando(true)
     try {
-      // SEGURANÇA: data e hora são derivadas do servidor — não enviamos do cliente
-      const res   = await pontoApi.validarBatida({ servidorId: mat })
+      const hora  = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      const data  = new Date().toISOString().split('T')[0]
+      const res   = await pontoApi.validarBatida({ servidorId: mat, data, hora })
       setValidacao((res.data as any).data as ValidacaoBatida)
     } catch {
       // Falha na validação não bloqueia — exibe aviso genérico
@@ -574,14 +548,13 @@ export default function BaterPontoPage() {
     }
     setLoading(true)
     try {
-      // SEGURANÇA: não enviamos data/hora — o servidor usa new Date() internamente
-      const response = await pontoApi.bater({ servidorId: matricula })
-      const { tipo, registro } = (response.data as any).data || {}
+      const hora     = formatarHora(dataHora)
+      const data     = dataHora.toISOString().split('T')[0]
+      const response = await pontoApi.bater({ servidorId: matricula, data, hora })
+      const { tipo } = (response.data as any).data || {}
       const tipoLabel = TIPO_BATIDA_LABEL[tipo] ?? tipo ?? 'batida'
-      // Hora exibida: relógio sincronizado com o servidor (dataHora já tem o offset aplicado)
-      const horaRegistrada = formatarHora(dataHora)
-      setLastBatida({ servidor: matricula, nome: servidorNome, hora: horaRegistrada, tipo: tipoLabel })
-      toast({ title: '✓ Ponto registrado!', description: `${servidorNome || matricula} — ${tipoLabel} às ${horaRegistrada}` })
+      setLastBatida({ servidor: matricula, nome: servidorNome, hora, tipo: tipoLabel })
+      toast({ title: '✓ Ponto registrado!', description: `${servidorNome || matricula} — ${tipoLabel} às ${hora}` })
       setMatricula('')
       setServidorNome('')
       setValidacao(null)

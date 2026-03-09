@@ -28,6 +28,8 @@ const notificacoesRoutes  = require('./modules/notificacoes/notificacoes.routes'
 const dashboardRoutes     = require('./modules/dashboard/dashboard.routes');
 const facialRoutes        = require('./modules/facial/facial.routes');
 const escalaRoutes        = require('./modules/escalas/escala.routes');
+const healthRoutes = require('./routes/health.routes')
+
 
 
 const app = express();
@@ -82,6 +84,7 @@ app.use(`${api}/escalas`,        escalaRoutes);
 
 // Rota pública de transparência (sem JWT)
 app.use(`${api}/public`,        transparenciaRoutes);
+app.use('/api/v1/health', healthRoutes)
 
 // -------------------------------------------------------
 // 404 para rotas não mapeadas

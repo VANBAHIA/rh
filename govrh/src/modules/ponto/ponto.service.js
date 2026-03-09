@@ -2,6 +2,21 @@ const prisma = require('../../config/prisma');
 const { Errors } = require('../../shared/errors/AppError');
 
 // ── Helper: converte "HH:mm" em minutos desde meia-noite ─────────
+// Formata Date como YYYY-MM-DD no timezone LOCAL (evita .toISOString() que retorna UTC)
+function _dataLocal(date) {
+  if (!date) return '';
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+// Formata Date como HH:mm no timezone LOCAL do processo (nunca UTC)
+function _hhmm(date) {
+  if (!date) return undefined;
+  return `${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+}
+
 function toMin(hhmm) {
   const [h, m] = hhmm.split(':').map(Number);
   return h * 60 + m;
@@ -73,7 +88,11 @@ class PontoService {
   //   { permitido: false, motivo, mensagem }  → servidor sem escala no dia
   //   { permitido: true, tipoBatida, aviso? } → pode registrar (com ou sem aviso)
   // ─────────────────────────────────────────────────────────────
-  async validarBatida(tenantId, { servidorId, data, hora }) {
+  async validarBatida(tenantId, { servidorId }) {
+    // SEGURANÇA: data e hora sempre do servidor, nunca do cliente
+    const agora = new Date();
+    const data  = `${agora.getFullYear()}-${String(agora.getMonth()+1).padStart(2,'0')}-${String(agora.getDate()).padStart(2,'0')}`;
+    const hora  = `${String(agora.getHours()).padStart(2,'0')}:${String(agora.getMinutes()).padStart(2,'0')}`;
     // 1. Resolve servidor
     const srv = await prisma.servidor.findFirst({
       where: {
@@ -118,20 +137,18 @@ class PontoService {
 
     // 4. Identifica qual batida é (baseado no registro existente do dia)
     // @db.Date no Prisma armazena como meia-noite UTC → usar range amplo para cobrir qualquer timezone
-    const dataInicioDia = new Date(data + 'T00:00:00.000Z'); // início do dia UTC
-    const dataFimDia    = new Date(data + 'T23:59:59.999Z'); // fim do dia UTC
+    // Local midnight — consistente com o que lancar() e bater() gravam
+    const [_vano, _vmes, _vdia] = data.split('-').map(Number);
+    const dataLocalMidnight = new Date(_vano, _vmes - 1, _vdia, 0, 0, 0, 0);
 
-    console.log('[validarBatida] servidorId recebido:', servidorId);
-    console.log('[validarBatida] srv.id resolvido:', srv.id);
-    console.log('[validarBatida] data param:', data);
-    console.log('[validarBatida] range busca:', dataInicioDia.toISOString(), '→', dataFimDia.toISOString());
+    console.log('[validarBatida] srv.id:', srv.id, '| data:', data, '| dataLocal:', dataLocalMidnight);
 
     const registroExistente = await prisma.registroPonto.findFirst({
       where: {
         servidorId: srv.id,
-        data: { gte: dataInicioDia, lte: dataFimDia },
+        data: dataLocalMidnight,
       },
-      orderBy: { createdAt: 'desc' }, // pega o mais recente do dia se houver duplicata
+      orderBy: { createdAt: 'desc' },
     });
 
     console.log('[validarBatida] registroExistente:', registroExistente
@@ -152,7 +169,7 @@ class PontoService {
 
     // Jornada encerrada — servidor já registrou a saída do dia
     if (registroExistente && registroExistente.saida) {
-      const saidaHora = registroExistente.saida.toISOString().split('T')[1].substring(0, 5);
+      const saidaHora = _hhmm(registroExistente.saida);
       return {
         permitido: false,
         motivo:    'JORNADA_ENCERRADA',
@@ -271,11 +288,11 @@ class PontoService {
     }, { horasTrabalhadas: 0, horasExtras: 0, horasFalta: 0, faltas: 0, faltasJustif: 0 });
 
     const batidas = registros.map(r => ({
-      data:             r.data.toISOString(),
-      entrada:          r.entrada        ? r.entrada.toISOString().split('T')[1].substring(0, 5)        : undefined,
-      saidaAlmoco:      r.saidaAlmoco    ? r.saidaAlmoco.toISOString().split('T')[1].substring(0, 5)    : undefined,
-      retornoAlmoco:    r.retornoAlmoco  ? r.retornoAlmoco.toISOString().split('T')[1].substring(0, 5)  : undefined,
-      saida:            r.saida          ? r.saida.toISOString().split('T')[1].substring(0, 5)          : undefined,
+      data:             _dataLocal(r.data),
+      entrada:          r.entrada        ? _hhmm(r.entrada)        : undefined,
+      saidaAlmoco:      r.saidaAlmoco    ? _hhmm(r.saidaAlmoco)    : undefined,
+      retornoAlmoco:    r.retornoAlmoco  ? _hhmm(r.retornoAlmoco)  : undefined,
+      saida:            r.saida          ? _hhmm(r.saida)          : undefined,
       horasTrabalhadas: r.horasTrabalhadas ? Number(r.horasTrabalhadas) : undefined,
       horasDevidas:     0,
       saldo:            r.horasExtras ? Number(r.horasExtras) : 0,
@@ -314,23 +331,37 @@ class PontoService {
 
     const servidorIdReal = srv.id;
 
-    // Normaliza data para meia-noite UTC — mesmo formato que o Prisma usa em @db.Date
-    const dataStr = typeof dados.data === 'string' ? dados.data.split('T')[0] : new Date(dados.data).toISOString().split('T')[0];
-    const data    = new Date(dataStr + 'T00:00:00.000Z');
+    // Data como local midnight — evita o T00:00:00.000Z que desloca para 21h do dia anterior no MySQL UTC-3
+    const dataStr = typeof dados.data === 'string' ? dados.data.split('T')[0] : _dataLocal(new Date(dados.data));
+    const [_dano, _dmes, _ddia] = dataStr.split('-').map(Number);
+    const data = new Date(_dano, _dmes - 1, _ddia, 0, 0, 0, 0);
 
-    const entrada       = dados.entrada       ? new Date(dados.entrada)       : null;
-    const saida         = dados.saida         ? new Date(dados.saida)         : null;
-    const saidaAlmoco   = dados.saidaAlmoco   ? new Date(dados.saidaAlmoco)   : null;
-    const retornoAlmoco = dados.retornoAlmoco ? new Date(dados.retornoAlmoco) : null;
+    // Timestamps: se vier como Date/objeto já construído (bater()), usa direto
+    // Se vier como string ISO, reconstrói como local para não sofrer conversão UTC
+    const _parseTs = (val) => {
+      if (!val) return null;
+      if (val instanceof Date) return val;
+      const d = new Date(val);
+      return isNaN(d.getTime()) ? null : d;
+    };
+    const entrada       = _parseTs(dados.entrada);
+    const saida         = _parseTs(dados.saida);
+    const saidaAlmoco   = _parseTs(dados.saidaAlmoco);
+    const retornoAlmoco = _parseTs(dados.retornoAlmoco);
 
     let horasTrabalhadas = 0;
     let horasExtras      = 0;
     let horasFalta       = 0;
 
     if (entrada && saida) {
-      const intervaloMin = dados.intervaloMin || 60;
-      const totalMin     = (saida - entrada) / 60000 - intervaloMin;
-      horasTrabalhadas   = parseFloat((totalMin / 60).toFixed(2));
+      // Subtrai apenas o intervalo real de almoço (retornoAlmoco - saidaAlmoco)
+      // Se não houver almoço registrado, intervalo = 0
+      let intervaloMin = 0;
+      if (saidaAlmoco && retornoAlmoco) {
+        intervaloMin = (retornoAlmoco - saidaAlmoco) / 60000;
+      }
+      const totalMin   = (saida - entrada) / 60000 - intervaloMin;
+      horasTrabalhadas = parseFloat((totalMin / 60).toFixed(2));
 
       const escalaVinc = await prisma.servidorEscala.findFirst({
         where: { servidorId: servidorIdReal, ativa: true },
@@ -344,7 +375,9 @@ class PontoService {
       }
     }
 
-    console.log('[lancar] upsert data UTC:', data.toISOString(), '| tipo:', dados.saidaAlmoco ? 'saidaAlmoco' : dados.retornoAlmoco ? 'retornoAlmoco' : dados.saida ? 'saida' : 'entrada');
+    console.log('[DIAG lancar] data objeto:', data, '| ISO:', data.toISOString(), '| getHours:', data.getHours());
+    console.log('[DIAG lancar] entrada:', entrada ? `ISO=${entrada.toISOString()} getH=${entrada.getHours()}:${entrada.getMinutes()}` : null);
+    console.log('[DIAG lancar] upsert data UTC:', data.toISOString(), '| tipo:', dados.saidaAlmoco ? 'saidaAlmoco' : dados.retornoAlmoco ? 'retornoAlmoco' : dados.saida ? 'saida' : 'entrada');
 
     return prisma.registroPonto.upsert({
       where: {
@@ -378,7 +411,7 @@ class PontoService {
     });
   }
 
-  async bater(tenantId, { servidorId, data, hora }) {
+  async bater(tenantId, { servidorId }) {
     const srv = await prisma.servidor.findFirst({
       where: {
         tenantId,
@@ -387,29 +420,48 @@ class PontoService {
     });
     if (!srv) throw Errors.NOT_FOUND('Servidor');
 
-    const ts = new Date(`${data}T${hora}`);
-    if (isNaN(ts)) throw Errors.APP_ERROR('Hora inválida');
+    // SEGURANÇA: timestamp sempre do servidor — frontend nao envia hora
+    const agora = new Date();
+    const ts    = agora;
+    const data  = `${agora.getFullYear()}-${String(agora.getMonth()+1).padStart(2,'0')}-${String(agora.getDate()).padStart(2,'0')}`;
+    console.log('[DIAG bater] process.env.TZ:', process.env.TZ);
+    console.log('[DIAG bater] ts.toISOString():', ts.toISOString());
+    console.log('[DIAG bater] ts.getHours():', ts.getHours(), '| ts.getMinutes():', ts.getMinutes());
+    console.log('[DIAG bater] data string:', data);
 
-    // Busca pelo valor exato da data em UTC — mesmo formato do lancar()
-    const dataUTC = new Date(data + 'T00:00:00.000Z');
+    // Data como local midnight — consistente com o que lancar() grava
+    const [_bano, _bmes, _bdia] = data.split('-').map(Number);
+    const dataLocal = new Date(_bano, _bmes - 1, _bdia, 0, 0, 0, 0);
     const registro = await prisma.registroPonto.findFirst({
-      where: { servidorId: srv.id, data: dataUTC },
+      where: { servidorId: srv.id, data: dataLocal },
     });
 
-    console.log('[bater] buscando registro para', srv.id, 'data UTC:', dataUTC.toISOString(), '| encontrou:', registro ? registro.id : null);
+    console.log('[bater] horario servidor:', agora.toISOString(), '| data:', data, '| registro:', registro ? registro.id : null);
+
+    // Busca o turno do dia para saber se ha almoco
+    const diaSemana = agora.getDay();
+    const vinculo   = await prisma.servidorEscala.findFirst({
+      where: { servidorId: srv.id, ativa: true },
+      include: { escala: true },
+    });
+    const turnos    = vinculo?.escala?.turnos && Array.isArray(vinculo.escala.turnos) ? vinculo.escala.turnos : [];
+    const turno     = turnos.find(t => t.diaSemana === diaSemana);
+    const temAlmoco = !!(turno?.almoco);
+
+    console.log('[bater] diaSemana:', diaSemana, '| temAlmoco:', temAlmoco);
 
     const campos = {};
     let tipoInserido = null;
 
-    // Sequência correta: entrada → saidaAlmoco → retornoAlmoco → saida
+    // Sequencia: entrada -> (saidaAlmoco -> retornoAlmoco, se houver almoco) -> saida
     if (!registro || !registro.entrada) {
       campos.entrada = ts;
       tipoInserido   = 'entrada';
-    } else if (!registro.saidaAlmoco) {
+    } else if (temAlmoco && !registro.saidaAlmoco) {
       campos.saidaAlmoco = ts;
       campos.entrada     = registro.entrada;
       tipoInserido       = 'saidaAlmoco';
-    } else if (!registro.retornoAlmoco) {
+    } else if (temAlmoco && registro.saidaAlmoco && !registro.retornoAlmoco) {
       campos.retornoAlmoco = ts;
       campos.entrada       = registro.entrada;
       campos.saidaAlmoco   = registro.saidaAlmoco;
@@ -495,7 +547,7 @@ class PontoService {
     return prisma.bancoHoras.create({
       data: {
         servidorId,
-        data:      new Date(data),
+        data:      (() => { const [_ca, _cm, _cd] = data.split('-').map(Number); return new Date(_ca, _cm-1, _cd, 0,0,0,0); })(),
         tipo:      'DEBITO',
         horas,
         saldo:     novoSaldo,
