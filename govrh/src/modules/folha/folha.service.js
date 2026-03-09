@@ -32,6 +32,7 @@ class FolhaService {
   }
 
   async criarVerba(tenantId, dados) {
+    if (dados.isSistema || dados.codigoSistema) throw Errors.FORBIDDEN('Verbas de sistema não podem ser criadas manualmente.');
     const dup = await prisma.verba.findFirst({ where: { tenantId, codigo: dados.codigo } });
     if (dup) throw Errors.ALREADY_EXISTS(`Verba com código ${dados.codigo}`);
     return prisma.verba.create({ data: { ...dados, tenantId } });
@@ -40,7 +41,16 @@ class FolhaService {
   async atualizarVerba(tenantId, id, dados) {
     const v = await prisma.verba.findFirst({ where: { id, tenantId } });
     if (!v) throw Errors.NOT_FOUND('Verba');
-    return prisma.verba.update({ where: { id }, data: dados });
+    if (v.isSistema) throw Errors.FORBIDDEN('Verbas de sistema não podem ser editadas.');
+    const { isSistema: _, codigoSistema: __, ...dadosSeguro } = dados;
+    return prisma.verba.update({ where: { id }, data: dadosSeguro });
+  }
+
+  async desativarVerba(tenantId, id) {
+    const v = await prisma.verba.findFirst({ where: { id, tenantId } });
+    if (!v) throw Errors.NOT_FOUND('Verba');
+    if (v.isSistema) throw Errors.FORBIDDEN('Verbas de sistema não podem ser desativadas.');
+    return prisma.verba.update({ where: { id }, data: { ativo: false } });
   }
 
   // ── Configuração ───────────────────────────────────────────
@@ -83,13 +93,24 @@ class FolhaService {
   async criarConsignado(tenantId, dados) {
     const srv = await prisma.servidor.findFirst({
       where: { id: dados.servidorId, tenantId },
-      include: { nivelSalarial: true },
+      include: {
+        vinculos: {
+          where: { atual: true },
+          take: 1,
+          include: { nivelSalarial: true, nivelComissionado: true },
+        },
+      },
     });
     if (!srv) throw Errors.NOT_FOUND('Servidor');
+    const vinculo = srv.vinculos[0];
+    if (!vinculo) throw Errors.NOT_FOUND('Vínculo funcional do servidor');
 
     // Verifica margem consignável
     const config = await this.getConfig(tenantId);
-    const margem = Number(srv.nivelSalarial.vencimentoBase) * (Number(config.margemConsignavel) / 100);
+    const vencBase = vinculo.regimeJuridico === 'COMISSIONADO' && vinculo.nivelComissionado
+      ? Number(vinculo.nivelComissionado.vencimento)
+      : Number(vinculo.nivelSalarial.vencimentoBase);
+    const margem = vencBase * (Number(config.margemConsignavel) / 100);
     const consignadosAtivos = await prisma.consignado.aggregate({
       where: { servidorId: dados.servidorId, ativo: true },
       _sum: { valorParcela: true },
@@ -157,22 +178,49 @@ class FolhaService {
       update: { status: 'EM_PROCESSAMENTO', totalProventos: 0, totalDescontos: 0, totalLiquido: 0, totalServid: 0 },
     });
 
-    // Busca servidores a processar
-    const where = { tenantId, situacaoFuncional: 'ATIVO' };
+    // Busca servidores a processar (situacaoFuncional fica no VinculoFuncional)
+    const where = {
+      tenantId,
+      vinculos: { some: { situacaoFuncional: 'ATIVO', atual: true } },
+    };
     if (servidorIds?.length) where.id = { in: servidorIds };
     const servidores = await prisma.servidor.findMany({
       where,
       include: {
-        nivelSalarial: true,
+        vinculos: {
+          where: { situacaoFuncional: 'ATIVO', atual: true },
+          take: 1,
+          include: {
+              nivelSalarial: true,
+              nivelComissionado: true,
+              gratificacaoFuncao: true,
+            },
+        },
         consignados: { where: { ativo: true } },
         dependentes: { where: { ativo: true, irrf: true } },
       },
     });
 
+    // Carrega mapa de verbas de sistema uma única vez por tenant
+    const verbasSistema = await prisma.verba.findMany({
+      where: { tenantId, isSistema: true },
+      select: { id: true, codigoSistema: true },
+    });
+    const verbaMap = Object.fromEntries(verbasSistema.map(v => [v.codigoSistema, v.id]));
+
+    const _codigosObrigatorios = [
+      'SYS_VENC_BASE', 'SYS_GF', 'SYS_RPPS', 'SYS_INSS', 'SYS_IRRF', 'SYS_CONSIGNADO',
+      'SYS_13_PRIMEIRA', 'SYS_13_SEGUNDA', 'SYS_FERIAS', 'SYS_ABONO_FERIAS',
+    ];
+    const _faltando = _codigosObrigatorios.filter(c => !verbaMap[c]);
+    if (_faltando.length > 0) {
+      throw new Error(`Verbas de sistema ausentes: ${_faltando.join(', ')}. Execute: node prisma/seed-verbas-sistema.js`);
+    }
+
     let totalProventos = 0, totalDescontos = 0, totalServid = 0;
 
     for (const srv of servidores) {
-      const resultado = await this._calcularServidor(srv, config, tipo);
+      const resultado = await this._calcularServidor(srv, config, tipo, verbaMap);
 
       // Upsert item da folha
       const item = await prisma.itemFolha.upsert({
@@ -210,8 +258,19 @@ class FolhaService {
     return { folha: folhaFinal, totalServid, totalProventos, totalDescontos, totalLiquido: totalProventos - totalDescontos };
   }
 
-  async _calcularServidor(srv, config, tipoFolha) {
-    const vencimentoBase = Number(srv.nivelSalarial.vencimentoBase);
+  async _calcularServidor(srv, config, tipoFolha, verbaMap) {
+    const vinculo = srv.vinculos[0];
+    if (!vinculo) throw new Error(`Servidor ${srv.matricula} sem vínculo ativo.`);
+    const regimeJuridico = vinculo.regimeJuridico;
+
+    // Para comissionados, o vencimento vem do NivelComissionado; para os demais, do NivelSalarial
+    let vencimentoBase;
+    if (regimeJuridico === 'COMISSIONADO' && vinculo.nivelComissionado) {
+      vencimentoBase = Number(vinculo.nivelComissionado.vencimento);
+    } else {
+      vencimentoBase = Number(vinculo.nivelSalarial.vencimentoBase);
+    }
+
     const verbas = [];
     let totalProventos = 0;
     let totalDescontos = 0;
@@ -219,59 +278,70 @@ class FolhaService {
     // ── PROVENTOS ─────────────────────────────────────────────
 
     // Vencimento base
-    verbas.push({ verbaId: null, valor: vencimentoBase, referencia: vencimentoBase, observacao: 'Vencimento Base' });
+    verbas.push({ verbaId: verbaMap['SYS_VENC_BASE'], valor: vencimentoBase, referencia: vencimentoBase, observacao: 'Vencimento Base' });
     totalProventos += vencimentoBase;
 
+    // Gratificação de Função (somente comissionados)
+    if (regimeJuridico === 'COMISSIONADO' && vinculo.gratificacaoFuncao) {
+      const percGf = Number(vinculo.gratificacaoFuncao.percentual) / 100;
+      const valorGf = parseFloat((vencimentoBase * percGf).toFixed(2));
+      verbas.push({ verbaId: verbaMap['SYS_GF'], valor: valorGf, referencia: percGf * 100, observacao: `GF - ${vinculo.gratificacaoFuncao.simbolo} (${Number(vinculo.gratificacaoFuncao.percentual).toFixed(0)}%)` });
+      totalProventos += valorGf;
+    }
+
     // 13º salário
+    if (tipoFolha === 'DECIMO_TERCEIRO_PRIMEIRA') {
+      const adiantamento = parseFloat((vencimentoBase / 2).toFixed(2));
+      verbas.push({ verbaId: verbaMap['SYS_13_PRIMEIRA'], valor: adiantamento, referencia: vencimentoBase, observacao: '13º Salário - 1ª Parcela' });
+      totalProventos += adiantamento;
+    }
     if (tipoFolha === 'DECIMO_TERCEIRO_SEGUNDA') {
       const decimo = vencimentoBase;
-      verbas.push({ verbaId: null, valor: decimo, referencia: vencimentoBase, observacao: '13º Salário - 2ª Parcela' });
+      verbas.push({ verbaId: verbaMap['SYS_13_SEGUNDA'], valor: decimo, referencia: vencimentoBase, observacao: '13º Salário - 2ª Parcela' });
       totalProventos += decimo;
     }
 
     // ── DESCONTOS ─────────────────────────────────────────────
 
     // RPPS ou INSS conforme regime
-    let basePrevidencia = vencimentoBase;
+    const basePrevidencia = vencimentoBase;
     let descontoPrevidencia = 0;
 
-    if (['ESTATUTARIO', 'COMISSIONADO'].includes(srv.regimeJuridico)) {
-      // RPPS — alíquota progressiva (EC 103/2019)
+    if (['ESTATUTARIO', 'COMISSIONADO'].includes(regimeJuridico)) {
       descontoPrevidencia = this._calcularRpps(basePrevidencia, config);
-      verbas.push({ verbaId: null, valor: descontoPrevidencia, observacao: 'RPPS' });
-    } else if (['CELETISTA', 'ESTAGIARIO', 'TEMPORARIO'].includes(srv.regimeJuridico)) {
-      // INSS — tabela progressiva
+      verbas.push({ verbaId: verbaMap['SYS_RPPS'], valor: descontoPrevidencia, referencia: basePrevidencia, observacao: 'RPPS' });
+    } else if (['CELETISTA', 'ESTAGIARIO', 'TEMPORARIO'].includes(regimeJuridico)) {
       descontoPrevidencia = this._calcularInss(basePrevidencia, config.tabelaInss);
-      verbas.push({ verbaId: null, valor: descontoPrevidencia, observacao: 'INSS' });
+      verbas.push({ verbaId: verbaMap['SYS_INSS'], valor: descontoPrevidencia, referencia: basePrevidencia, observacao: 'INSS' });
     }
     totalDescontos += descontoPrevidencia;
 
     // IRRF
     const numDependentes = srv.dependentes?.length || 0;
-    const deducaoDependentes = numDependentes * 189.59; // Valor 2024
+    const deducaoDependentes = numDependentes * 189.59;
     const baseIrrf = Math.max(0, totalProventos - descontoPrevidencia - deducaoDependentes);
     const irrf = this._calcularIrrf(baseIrrf, config.tabelaIrrf);
     if (irrf > 0) {
-      verbas.push({ verbaId: null, valor: irrf, referencia: baseIrrf, observacao: `IRRF (${numDependentes} dep.)` });
+      verbas.push({ verbaId: verbaMap['SYS_IRRF'], valor: irrf, referencia: baseIrrf, observacao: `IRRF (${numDependentes} dep.)` });
       totalDescontos += irrf;
     }
 
     // Consignados
     for (const c of srv.consignados || []) {
       const parcela = Number(c.valorParcela);
-      verbas.push({ verbaId: null, valor: parcela, observacao: `Consignado - ${c.credor}` });
+      verbas.push({ verbaId: verbaMap['SYS_CONSIGNADO'], valor: parcela, observacao: `Consignado - ${c.credor}` });
       totalDescontos += parcela;
     }
 
     return {
-      verbas: verbas.filter(v => v.verbaId !== null || v.observacao), // filtra apenas os que têm info
+      verbas,
       totais: {
         totalProventos,
         totalDescontos,
         totalLiquido: totalProventos - totalDescontos,
         baseIrrf,
         baseRppsInss: basePrevidencia,
-        baseFgts: ['CELETISTA'].includes(srv.regimeJuridico) ? vencimentoBase : 0,
+        baseFgts: ['CELETISTA'].includes(regimeJuridico) ? vencimentoBase : 0,
       },
     };
   }
@@ -321,23 +391,156 @@ class FolhaService {
     return folha;
   }
 
+  async excluir(tenantId, competencia, tipo) {
+    const folha = await prisma.folhaPagamento.findFirst({ where: { tenantId, competencia, tipo } });
+    if (!folha) throw Errors.NOT_FOUND('Folha de Pagamento');
+
+    await prisma.$transaction([
+      prisma.itemFolhaVerba.deleteMany({ where: { itemFolha: { folhaPagamentoId: folha.id } } }),
+      prisma.itemFolha.deleteMany({ where: { folhaPagamentoId: folha.id } }),
+      prisma.folhaPagamento.delete({ where: { id: folha.id } }),
+    ]);
+
+    return { message: 'Folha excluída' };
+  }
+
+  async reprocessarServidor(tenantId, competencia, tipo, servidorId) {
+    const folha = await prisma.folhaPagamento.findFirst({ where: { tenantId, competencia, tipo } });
+    if (!folha) throw Errors.NOT_FOUND('Folha de Pagamento');
+    if (folha.status === 'FECHADA') throw Errors.FOLHA_FECHADA();
+
+    const srv = await prisma.servidor.findFirst({
+      where: {
+        tenantId,
+        id: servidorId,
+        vinculos: { some: { situacaoFuncional: 'ATIVO', atual: true } },
+      },
+      include: {
+        vinculos: {
+          where: { situacaoFuncional: 'ATIVO', atual: true },
+          take: 1,
+          include: {
+            nivelSalarial: true,
+            nivelComissionado: true,
+            gratificacaoFuncao: true,
+          },
+        },
+        consignados: { where: { ativo: true } },
+        dependentes: { where: { ativo: true, irrf: true } },
+      },
+    });
+    if (!srv) throw Errors.NOT_FOUND('Servidor');
+
+    const config = await this.getConfig(tenantId);
+    const verbasSistema = await prisma.verba.findMany({ where: { tenantId, isSistema: true }, select: { id: true, codigoSistema: true } });
+    const verbaMap = Object.fromEntries(verbasSistema.map(v => [v.codigoSistema, v.id]));
+
+    const resultado = await this._calcularServidor(srv, config, tipo, verbaMap);
+
+    const item = await prisma.itemFolha.upsert({
+      where: { folhaPagamentoId_servidorId: { folhaPagamentoId: folha.id, servidorId: srv.id } },
+      create: { folhaPagamentoId: folha.id, servidorId: srv.id, ...resultado.totais },
+      update: resultado.totais,
+    });
+
+    await prisma.itemFolhaVerba.deleteMany({ where: { itemFolhaId: item.id } });
+    if (resultado.verbas.length) {
+      await prisma.itemFolhaVerba.createMany({ data: resultado.verbas.map(v => ({ itemFolhaId: item.id, ...v })) });
+    }
+
+    const totals = await prisma.itemFolha.aggregate({
+      where: { folhaPagamentoId: folha.id },
+      _sum: { totalProventos: true, totalDescontos: true, totalLiquido: true },
+      _count: { servidorId: true },
+    });
+    await prisma.folhaPagamento.update({
+      where: { id: folha.id },
+      data: {
+        totalProventos: totals._sum.totalProventos || 0,
+        totalDescontos: totals._sum.totalDescontos || 0,
+        totalLiquido: totals._sum.totalLiquido || 0,
+        totalServid: totals._count.servidorId || 0,
+      },
+    });
+
+    return { servidorId: srv.id, folhaId: folha.id };
+  }
+
   async listarItens(tenantId, competencia, tipo, query = {}, skip = 0, take = 20) {
     const folha = await this.buscarFolha(tenantId, competencia, tipo);
-    const where = { folhaPagamentoId: folha.id };
+    return this._listarItensPorFolhaId(tenantId, folha.id, query, skip, take);
+  }
+
+  async listarItensPorId(tenantId, folhaId, query = {}, skip = 0, take = 20) {
+    const folha = await prisma.folhaPagamento.findFirst({ where: { id: folhaId, tenantId } });
+    if (!folha) throw Errors.NOT_FOUND('Folha de Pagamento');
+    return this._listarItensPorFolhaId(tenantId, folhaId, query, skip, take);
+  }
+
+  async _listarItensPorFolhaId(tenantId, folhaId, query = {}, skip = 0, take = 20) {
+    const where = { folhaPagamentoId: folhaId };
     if (query.servidorId) where.servidorId = query.servidorId;
+    if (query.search) {
+      where.servidor = {
+        OR: [
+          { nome:      { contains: query.search } },
+          { matricula: { contains: query.search } },
+        ],
+      };
+    }
 
     const [itens, total] = await prisma.$transaction([
       prisma.itemFolha.findMany({
         where, skip, take,
+        orderBy: { servidor: { nome: 'asc' } },
         include: {
-          servidor: { select: { id: true, matricula: true, nome: true, regimeJuridico: true,
-            cargo: { select: { nome: true } }, lotacao: { select: { nome: true } } } },
-          verbas: true,
+          servidor: {
+            select: {
+              id: true,
+              matricula: true,
+              nome: true,
+              vinculos: {
+                where: { atual: true },
+                take: 1,
+                select: {
+                  cargo:   { select: { nome: true } },
+                  lotacao: { select: { nome: true } },
+                },
+              },
+            },
+          },
+          verbas: {
+            include: { verba: { select: { id: true, codigo: true, nome: true, tipo: true, codigoSistema: true } } },
+          },
         },
       }),
       prisma.itemFolha.count({ where }),
     ]);
-    return { itens, total };
+
+    const itensFormatados = itens.map(item => ({
+      ...item,
+      servidor: {
+        id:        item.servidor.id,
+        matricula: item.servidor.matricula,
+        nome:      item.servidor.nome,
+        cargo:     item.servidor.vinculos[0]?.cargo?.nome  ?? '—',
+        lotacao:   item.servidor.vinculos[0]?.lotacao?.nome ?? '—',
+      },
+      verbas: item.verbas.map(v => ({
+        id:           v.id,
+        verbaId:      v.verbaId,
+        codigo:       v.verba?.codigo,
+        nome:         v.verba?.nome,
+        tipo:         v.verba?.tipo,
+        codigoSistema: v.verba?.codigoSistema,
+        valor:        Number(v.valor),
+        quantidade:   v.quantidade ? Number(v.quantidade) : null,
+        referencia:   v.referencia ? Number(v.referencia) : null,
+        observacao:   v.observacao,
+      })),
+    }));
+
+    return { itens: itensFormatados, total };
   }
 
   async fechar(tenantId, competencia, tipo) {
@@ -360,45 +563,231 @@ class FolhaService {
     });
   }
 
-  async holerite(tenantId, servidorId, competencia) {
+  async excluir(tenantId, competencia, tipo) {
+    // somente permite exclusão de folhas que não estejam fechadas
+    const folha = await this.buscarFolha(tenantId, competencia, tipo);
+    if (folha.status === 'FECHADA') throw Errors.VALIDATION('Não é possível excluir folha fechada.');
+
+    // apaga itens e verbas manualmente porque não há cascade na relação
+    await prisma.itemFolhaVerba.deleteMany({
+      where: { itemFolha: { folhaPagamentoId: folha.id } },
+    });
+    await prisma.itemFolha.deleteMany({
+      where: { folhaPagamentoId: folha.id },
+    });
+    await prisma.folhaPagamento.delete({ where: { id: folha.id } });
+    return { success: true };
+  }
+
+  async holerite(tenantId, servidorId, competencia, tipo) {
     const srv = await prisma.servidor.findFirst({
       where: { id: servidorId, tenantId },
       include: {
-        cargo: true, lotacao: true,
-        nivelSalarial: { include: { tabelaSalarial: true } },
+        vinculos: {
+          where: { atual: true },
+          take: 1,
+          include: {
+            cargo: true,
+            lotacao: true,
+            nivelSalarial: { include: { tabelaSalarial: true } },
+          },
+        },
       },
     });
     if (!srv) throw Errors.NOT_FOUND('Servidor');
+    const vinculo = srv.vinculos[0];
+    if (!vinculo) throw Errors.NOT_FOUND('Vínculo funcional do servidor');
+
+    const folhaWhere = { tenantId, competencia };
+    if (tipo) folhaWhere.tipo = tipo;
 
     const item = await prisma.itemFolha.findFirst({
       where: {
         servidorId,
-        folhaPagamento: { tenantId, competencia, tipo: 'MENSAL' },
+        folhaPagamento: folhaWhere,
       },
+      orderBy: { folhaPagamento: { processadaEm: 'desc' } },
       include: {
-        verbas: true,
-        folhaPagamento: { select: { competencia: true, tipo: true, status: true } },
+        verbas: {
+          include: { verba: { select: { id: true, codigo: true, nome: true, tipo: true, codigoSistema: true } } },
+        },
+        folhaPagamento: { select: { id: true, competencia: true, tipo: true, status: true } },
       },
     });
     if (!item) throw Errors.NOT_FOUND(`Holerite para competência ${competencia}`);
 
+    const verbas = item.verbas.map(v => ({
+      id:           v.id,
+      codigo:       v.verba?.codigo,
+      nome:         v.verba?.nome ?? v.observacao,
+      tipo:         v.verba?.tipo,
+      codigoSistema: v.verba?.codigoSistema,
+      valor:        Number(v.valor),
+      referencia:   v.referencia ? Number(v.referencia) : null,
+      quantidade:   v.quantidade ? Number(v.quantidade) : null,
+      observacao:   v.observacao,
+    }));
+
     return {
-      servidor: {
-        matricula: srv.matricula, nome: srv.nome,
-        cargo: srv.cargo.nome, lotacao: srv.lotacao.nome,
-        regime: srv.regimeJuridico,
-        nivel: srv.nivelSalarial.nivel, classe: srv.nivelSalarial.classe,
-      },
+      folhaId:     item.folhaPagamento.id,
       competencia: item.folhaPagamento.competencia,
-      proventos: item.verbas.filter(v => v.valor > 0),
-      descontos: item.verbas.filter(v => v.valor < 0).map(v => ({ ...v, valor: Math.abs(v.valor) })),
-      totais: {
-        bruto: item.totalProventos,
-        descontos: item.totalDescontos,
-        liquido: item.totalLiquido,
-        baseIrrf: item.baseIrrf,
-        basePrevidencia: item.baseRppsInss,
+      tipo:        item.folhaPagamento.tipo,
+      status:      item.folhaPagamento.status,
+      servidor: {
+        id:        srv.id,
+        matricula: srv.matricula,
+        nome:      srv.nome,
+        cpf:       srv.cpf,
+        cargo:     vinculo.cargo?.nome,
+        lotacao:   vinculo.lotacao?.nome,
+        regime:    vinculo.regimeJuridico,
+        nivel:     vinculo.nivelSalarial?.nivel,
+        classe:    vinculo.nivelSalarial?.classe,
+        tabela:    vinculo.nivelSalarial?.tabelaSalarial?.nome,
       },
+      proventos:  verbas.filter(v => v.tipo === 'PROVENTO'),
+      descontos:  verbas.filter(v => v.tipo === 'DESCONTO'),
+      informativos: verbas.filter(v => v.tipo === 'INFORMATIVO'),
+      totais: {
+        bruto:          Number(item.totalProventos),
+        descontos:      Number(item.totalDescontos),
+        liquido:        Number(item.totalLiquido),
+        baseIrrf:       item.baseIrrf    ? Number(item.baseIrrf)    : null,
+        basePrevidencia: item.baseRppsInss ? Number(item.baseRppsInss) : null,
+        baseFgts:       item.baseFgts    ? Number(item.baseFgts)    : null,
+      },
+    };
+  }
+
+  async relatorioAnalitico(tenantId, competencia, tipo) {
+    const folha = await this.buscarFolha(tenantId, competencia, tipo);
+
+    const itens = await prisma.itemFolha.findMany({
+      where: { folhaPagamentoId: folha.id },
+      orderBy: [
+        { servidor: { vinculos: { _count: 'asc' } } },
+        { servidor: { nome: 'asc' } },
+      ],
+      include: {
+        servidor: {
+          select: {
+            id: true, matricula: true, nome: true, cpf: true,
+            vinculos: {
+              where: { atual: true },
+              take: 1,
+              select: {
+                regimeJuridico: true,
+                dataAdmissao: true,
+                cargo:   { select: { nome: true } },
+                lotacao: { select: { nome: true, sigla: true } },
+                nivelSalarial: { select: { nivel: true, classe: true } },
+              },
+            },
+          },
+        },
+        verbas: {
+          include: { verba: { select: { codigo: true, nome: true, tipo: true, codigoSistema: true } } },
+          orderBy: [{ verba: { tipo: 'asc' } }, { verba: { codigo: 'asc' } }],
+        },
+      },
+    });
+
+    const servidoresFormatados = itens.map(item => {
+      const vinculo = item.servidor.vinculos[0];
+      return {
+        id:        item.id,
+        matricula: item.servidor.matricula,
+        nome:      item.servidor.nome,
+        cpf:       item.servidor.cpf,
+        cargo:     vinculo?.cargo?.nome    ?? '—',
+        lotacao:   vinculo?.lotacao?.nome  ?? '—',
+        lotacaoSigla: vinculo?.lotacao?.sigla ?? '—',
+        regime:    vinculo?.regimeJuridico ?? '—',
+        admissao:  vinculo?.dataAdmissao   ?? null,
+        nivel:     vinculo?.nivelSalarial?.nivel ?? null,
+        classe:    vinculo?.nivelSalarial?.classe ?? null,
+        proventos: item.verbas
+          .filter(v => v.verba?.tipo === 'PROVENTO')
+          .map(v => ({
+            codigo: v.verba?.codigo, nome: v.verba?.nome ?? v.observacao,
+            valor: Number(v.valor), referencia: v.referencia ? Number(v.referencia) : null,
+            fator: v.quantidade ? Number(v.quantidade) : 1,
+          })),
+        descontos: item.verbas
+          .filter(v => v.verba?.tipo === 'DESCONTO')
+          .map(v => ({
+            codigo: v.verba?.codigo, nome: v.verba?.nome ?? v.observacao,
+            valor: Number(v.valor), referencia: v.referencia ? Number(v.referencia) : null,
+            fator: v.quantidade ? Number(v.quantidade) : null,
+          })),
+        totalProventos: Number(item.totalProventos),
+        totalDescontos: Number(item.totalDescontos),
+        totalLiquido:   Number(item.totalLiquido),
+        baseIrrf:       item.baseIrrf    ? Number(item.baseIrrf)    : null,
+        basePrevidencia: item.baseRppsInss ? Number(item.baseRppsInss) : null,
+      };
+    });
+
+    return {
+      folha: {
+        id: folha.id, competencia: folha.competencia, tipo: folha.tipo,
+        status: folha.status, processadaEm: folha.processadaEm,
+        totalProventos: Number(folha.totalProventos),
+        totalDescontos: Number(folha.totalDescontos),
+        totalLiquido:   Number(folha.totalLiquido),
+        totalServid:    folha.totalServid,
+      },
+      servidores: servidoresFormatados,
+    };
+  }
+
+  async relatorioSintetico(tenantId, competencia, tipo) {
+    const folha = await this.buscarFolha(tenantId, competencia, tipo);
+
+    const itens = await prisma.itemFolha.findMany({
+      where: { folhaPagamentoId: folha.id },
+      orderBy: { servidor: { nome: 'asc' } },
+      include: {
+        servidor: {
+          select: {
+            id: true, matricula: true, nome: true,
+            vinculos: {
+              where: { atual: true },
+              take: 1,
+              select: {
+                cargo:   { select: { nome: true } },
+                lotacao: { select: { nome: true, sigla: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const linhas = itens.map(item => {
+      const vinculo = item.servidor.vinculos[0];
+      return {
+        id:            item.id,
+        matricula:     item.servidor.matricula,
+        nome:          item.servidor.nome,
+        cargo:         vinculo?.cargo?.nome   ?? '—',
+        lotacao:       vinculo?.lotacao?.nome ?? '—',
+        totalProventos: Number(item.totalProventos),
+        totalDescontos: Number(item.totalDescontos),
+        totalLiquido:   Number(item.totalLiquido),
+      };
+    });
+
+    return {
+      folha: {
+        id: folha.id, competencia: folha.competencia, tipo: folha.tipo,
+        status: folha.status, processadaEm: folha.processadaEm,
+        totalProventos: Number(folha.totalProventos),
+        totalDescontos: Number(folha.totalDescontos),
+        totalLiquido:   Number(folha.totalLiquido),
+        totalServid:    folha.totalServid,
+      },
+      linhas,
     };
   }
 }

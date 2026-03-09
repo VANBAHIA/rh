@@ -13,65 +13,65 @@ const prisma = new PrismaClient();
 // ── Permissões do sistema ─────────────────────────────────────
 const PERMISSOES = [
   // Servidores
-  { recurso: 'servidores',    acao: 'read',   descricao: 'Visualizar servidores' },
-  { recurso: 'servidores',    acao: 'create', descricao: 'Cadastrar servidores' },
-  { recurso: 'servidores',    acao: 'update', descricao: 'Editar servidores' },
-  { recurso: 'servidores',    acao: 'delete', descricao: 'Desativar servidores' },
+  { recurso: 'servidores', acao: 'read', descricao: 'Visualizar servidores' },
+  { recurso: 'servidores', acao: 'create', descricao: 'Cadastrar servidores' },
+  { recurso: 'servidores', acao: 'update', descricao: 'Editar servidores' },
+  { recurso: 'servidores', acao: 'delete', descricao: 'Desativar servidores' },
   // Cargos / PCCV
-  { recurso: 'cargos',        acao: 'read',   descricao: 'Visualizar cargos e PCCV' },
-  { recurso: 'cargos',        acao: 'create', descricao: 'Criar cargos e tabelas' },
-  { recurso: 'cargos',        acao: 'update', descricao: 'Editar cargos e tabelas' },
-  { recurso: 'cargos',        acao: 'delete', descricao: 'Desativar cargos' },
+  { recurso: 'cargos', acao: 'read', descricao: 'Visualizar cargos e PCCV' },
+  { recurso: 'cargos', acao: 'create', descricao: 'Criar cargos e tabelas' },
+  { recurso: 'cargos', acao: 'update', descricao: 'Editar cargos e tabelas' },
+  { recurso: 'cargos', acao: 'delete', descricao: 'Desativar cargos' },
   // Folha
-  { recurso: 'folha',         acao: 'read',   descricao: 'Visualizar folha de pagamento' },
-  { recurso: 'folha',         acao: 'create', descricao: 'Processar folha de pagamento' },
-  { recurso: 'folha',         acao: 'update', descricao: 'Fechar/reabrir folha' },
+  { recurso: 'folha', acao: 'read', descricao: 'Visualizar folha de pagamento' },
+  { recurso: 'folha', acao: 'create', descricao: 'Processar folha de pagamento' },
+  { recurso: 'folha', acao: 'update', descricao: 'Fechar/reabrir folha' },
   // Ponto
-  { recurso: 'ponto',         acao: 'read',   descricao: 'Visualizar registros de ponto' },
-  { recurso: 'ponto',         acao: 'create', descricao: 'Lançar registros de ponto' },
-  { recurso: 'ponto',         acao: 'update', descricao: 'Abonar e corrigir ponto' },
+  { recurso: 'ponto', acao: 'read', descricao: 'Visualizar registros de ponto' },
+  { recurso: 'ponto', acao: 'create', descricao: 'Lançar registros de ponto' },
+  { recurso: 'ponto', acao: 'update', descricao: 'Abonar e corrigir ponto' },
   // Férias
-  { recurso: 'ferias',        acao: 'read',   descricao: 'Visualizar férias' },
-  { recurso: 'ferias',        acao: 'create', descricao: 'Agendar férias' },
-  { recurso: 'ferias',        acao: 'update', descricao: 'Aprovar/cancelar férias' },
+  { recurso: 'ferias', acao: 'read', descricao: 'Visualizar férias' },
+  { recurso: 'ferias', acao: 'create', descricao: 'Agendar férias' },
+  { recurso: 'ferias', acao: 'update', descricao: 'Aprovar/cancelar férias' },
   // Licenças
-  { recurso: 'licencas',      acao: 'read',   descricao: 'Visualizar licenças' },
-  { recurso: 'licencas',      acao: 'create', descricao: 'Solicitar licenças' },
-  { recurso: 'licencas',      acao: 'update', descricao: 'Aprovar/encerrar licenças' },
+  { recurso: 'licencas', acao: 'read', descricao: 'Visualizar licenças' },
+  { recurso: 'licencas', acao: 'create', descricao: 'Solicitar licenças' },
+  { recurso: 'licencas', acao: 'update', descricao: 'Aprovar/encerrar licenças' },
   // Progressão
-  { recurso: 'progressao',    acao: 'read',   descricao: 'Visualizar progressões' },
-  { recurso: 'progressao',    acao: 'create', descricao: 'Registrar progressões' },
-  { recurso: 'progressao',    acao: 'update', descricao: 'Aprovar/rejeitar progressões' },
+  { recurso: 'progressao', acao: 'read', descricao: 'Visualizar progressões' },
+  { recurso: 'progressao', acao: 'create', descricao: 'Registrar progressões' },
+  { recurso: 'progressao', acao: 'update', descricao: 'Aprovar/rejeitar progressões' },
   // Concursos
-  { recurso: 'concursos',     acao: 'read',   descricao: 'Visualizar concursos e candidatos' },
-  { recurso: 'concursos',     acao: 'create', descricao: 'Criar concursos e registrar posse' },
-  { recurso: 'concursos',     acao: 'update', descricao: 'Editar concursos e convocar' },
+  { recurso: 'concursos', acao: 'read', descricao: 'Visualizar concursos e candidatos' },
+  { recurso: 'concursos', acao: 'create', descricao: 'Criar concursos e registrar posse' },
+  { recurso: 'concursos', acao: 'update', descricao: 'Editar concursos e convocar' },
   // Aposentadoria
-  { recurso: 'aposentadoria', acao: 'read',   descricao: 'Visualizar aposentadorias' },
+  { recurso: 'aposentadoria', acao: 'read', descricao: 'Visualizar aposentadorias' },
   { recurso: 'aposentadoria', acao: 'create', descricao: 'Registrar pedidos de aposentadoria' },
   { recurso: 'aposentadoria', acao: 'update', descricao: 'Conceder/indeferir aposentadoria' },
   // Disciplinar
-  { recurso: 'disciplinar',   acao: 'read',   descricao: 'Visualizar processos disciplinares' },
-  { recurso: 'disciplinar',   acao: 'create', descricao: 'Instaurar processos disciplinares' },
-  { recurso: 'disciplinar',   acao: 'update', descricao: 'Aplicar penalidades' },
-  { recurso: 'disciplinar',   acao: 'delete', descricao: 'Arquivar processos' },
+  { recurso: 'disciplinar', acao: 'read', descricao: 'Visualizar processos disciplinares' },
+  { recurso: 'disciplinar', acao: 'create', descricao: 'Instaurar processos disciplinares' },
+  { recurso: 'disciplinar', acao: 'update', descricao: 'Aplicar penalidades' },
+  { recurso: 'disciplinar', acao: 'delete', descricao: 'Arquivar processos' },
   // Assinatura
-  { recurso: 'assinatura',    acao: 'read',   descricao: 'Visualizar documentos para assinar' },
-  { recurso: 'assinatura',    acao: 'create', descricao: 'Criar documentos para assinatura' },
-  { recurso: 'assinatura',    acao: 'update', descricao: 'Assinar/recusar documentos' },
+  { recurso: 'assinatura', acao: 'read', descricao: 'Visualizar documentos para assinar' },
+  { recurso: 'assinatura', acao: 'create', descricao: 'Criar documentos para assinatura' },
+  { recurso: 'assinatura', acao: 'update', descricao: 'Assinar/recusar documentos' },
   // Notificações
-  { recurso: 'notificacoes',  acao: 'read',   descricao: 'Visualizar notificações' },
+  { recurso: 'notificacoes', acao: 'read', descricao: 'Visualizar notificações' },
 ];
 
 // ── Perfis de acesso padrão ───────────────────────────────────
 // Quais permissões cada role recebe no seed
 const PERFIL_PERMISSOES = {
-  ADMIN_ORGAO:  'all',  // todas
-  GESTOR_RH:    ['servidores', 'cargos', 'folha', 'ponto', 'ferias', 'licencas', 'progressao', 'concursos', 'aposentadoria', 'assinatura', 'notificacoes'],
+  ADMIN_ORGAO: 'all',  // todas
+  GESTOR_RH: ['servidores', 'cargos', 'folha', 'ponto', 'ferias', 'licencas', 'progressao', 'concursos', 'aposentadoria', 'assinatura', 'notificacoes'],
   GESTOR_PONTO: ['ponto', 'servidores:read'],
-  CHEFE_SETOR:  ['servidores:read', 'ferias:read', 'ferias:update', 'licencas:read', 'licencas:update', 'ponto:read', 'notificacoes:read'],
-  SERVIDOR:     ['notificacoes:read'],
-  AUDITOR:      ['servidores:read', 'cargos:read', 'folha:read', 'ponto:read', 'ferias:read', 'licencas:read', 'progressao:read', 'concursos:read', 'aposentadoria:read', 'disciplinar:read'],
+  CHEFE_SETOR: ['servidores:read', 'ferias:read', 'ferias:update', 'licencas:read', 'licencas:update', 'ponto:read', 'notificacoes:read'],
+  SERVIDOR: ['notificacoes:read'],
+  AUDITOR: ['servidores:read', 'cargos:read', 'folha:read', 'ponto:read', 'ferias:read', 'licencas:read', 'progressao:read', 'concursos:read', 'aposentadoria:read', 'disciplinar:read'],
 };
 
 async function main() {
@@ -97,15 +97,16 @@ async function main() {
   const tenant = await prisma.tenant.upsert({
     where: { cnpj: '00.000.000/0001-00' },
     create: {
-      nome:             'Prefeitura Municipal de Exemplo',
-      nomeAbreviado:    'PME',
-      cnpj:             '00.000.000/0001-00',
-      tipoOrgao:        'PREFEITURA',
-      uf:               'SP',
-      municipio:        'Exemplo',
-      ativo:            true,
+      razaoSocial: 'Prefeitura Municipal de Exemplo',
+      nomeFantasia: 'PME - Prefeitura Municipal de Exemplo',
+      cnpj: '00.000.000/0001-00',
+      tipoOrgao: 'PREFEITURA',
+      esfera: 'MUNICIPAL',
+      uf: 'SP',
+      municipio: 'Exemplo',
+      ativo: true,
       limiteServidores: 9999,
-      plano:            'ENTERPRISE',
+      plano: 'ENTERPRISE',
     },
     update: {},
   });
@@ -163,13 +164,18 @@ async function main() {
 
   const superSenha = await bcrypt.hash('Admin@2026!', 12);
   const superAdmin = await prisma.usuario.upsert({
-    where: { email_tenantId: { email: 'admin@govrh.gov.br', tenantId: tenant.id } },
+    where: {
+      tenantId_email: {
+        tenantId: tenant.id,
+        email: 'admin@govrh.gov.br'
+      }
+    },
     create: {
       tenantId: tenant.id,
-      nome:     'Super Administrador',
-      email:    'admin@govrh.gov.br',
+      nome: 'Super Administrador',
+      email: 'admin@govrh.gov.br',
       senhaHash: superSenha,
-      ativo:    true,
+      ativo: true,
       roles: { create: { roleId: roleSuper.id } },
     },
     update: {},
@@ -181,14 +187,20 @@ async function main() {
 
   console.log('\n👤 Criando Admin do Órgão...');
   const adminSenha = await bcrypt.hash('Rh@2026Pme', 12);
+
   const adminOrgao = await prisma.usuario.upsert({
-    where: { email_tenantId: { email: 'rh@exemplo.gov.br', tenantId: tenant.id } },
+    where: {
+      tenantId_email: {
+        tenantId: tenant.id,
+        email: 'rh@exemplo.gov.br'
+      }
+    },
     create: {
       tenantId: tenant.id,
-      nome:     'Administrador RH',
-      email:    'rh@exemplo.gov.br',
+      nome: 'Administrador RH',
+      email: 'rh@exemplo.gov.br',
       senhaHash: adminSenha,
-      ativo:    true,
+      ativo: true,
       roles: { create: { roleId: rolesCreated['ADMIN_ORGAO'].id } },
     },
     update: {},
@@ -256,12 +268,21 @@ async function main() {
 
   // Cargos
   const cargoProf = await prisma.cargo.upsert({
-    where: { tenantId_codigo: { tenantId: tenant.id, codigo: 'PROF-01' } },
+    where: {
+      tenantId_codigo: {
+        tenantId: tenant.id,
+        codigo: 'PROF-01'
+      }
+    },
     create: {
-      tenantId: tenant.id, grupoOcupacionalId: grupoMag.id,
-      codigo: 'PROF-01', nome: 'Professor de Educação Básica I',
-      regimeJuridico: 'ESTATUTARIO', cargaHoraria: 40,
-      escolaridadeMinima: 'SUPERIOR', ativo: true,
+      tenantId: tenant.id,
+      grupoOcupacionalId: grupoMag.id,
+      codigo: 'PROF-01',
+      nome: 'Professor de Educação Básica I',
+      regimeJuridico: 'ESTATUTARIO',
+      cargaHorariaSemanal: 40, // ← CORRIGIDO
+      escolaridadeMinima: 'SUPERIOR_COMPLETO',
+      ativo: true,
       descricao: 'Docente do ensino fundamental anos iniciais',
     },
     update: {},
@@ -272,8 +293,8 @@ async function main() {
     create: {
       tenantId: tenant.id, grupoOcupacionalId: grupoAdm.id,
       codigo: 'AGADM-01', nome: 'Agente Administrativo',
-      regimeJuridico: 'ESTATUTARIO', cargaHoraria: 40,
-      escolaridadeMinima: 'MEDIO', ativo: true,
+      regimeJuridico: 'ESTATUTARIO', cargaHorariaSemanal: 40,
+      escolaridadeMinima: 'MEDIO_COMPLETO', ativo: true,
     },
     update: {},
   });
@@ -317,20 +338,7 @@ async function main() {
       cpf: '123.456.789-00',
       dataNascimento: new Date('1985-06-15'),
       sexo: 'FEMININO',
-      escolaridade: 'SUPERIOR',
-      nivelTitulacao: 'II',
-      emailInstitucional: 'maria.silva@exemplo.gov.br',
-      cargoId: cargoProf.id,
-      tabelaSalarialId: tabela.id,
-      nivelSalarialId: nivelIIa.id,
-      lotacaoId: secretaria.id,
-      regimeJuridico: 'ESTATUTARIO',
-      situacaoFuncional: 'ATIVO',
-      dataAdmissao: new Date('2018-03-01'),
-      dataPosse: new Date('2018-03-01'),
-      cargaHorariaSemanal: 40,
-      municipio: 'Exemplo',
-      uf: 'SP',
+      estadoCivil: 'SOLTEIRO',
     },
     update: {},
   });
@@ -348,7 +356,7 @@ async function main() {
     create: {
       servidorId: servidorExemplo.id,
       dataInicio: new Date('2023-03-01'),
-      dataFim:    new Date('2024-02-29'),
+      dataFim: new Date('2024-02-29'),
       diasDireito: 30,
       diasGozados: 0,
       diasAbono: 0,
@@ -367,17 +375,17 @@ async function main() {
       percentualRpps: 14.00,
       margemConsignavel: 35.00,
       tabelaIrrf: [
-        { ate: 2259.20,  aliquota: 0,     deducao: 0       },
-        { ate: 2826.65,  aliquota: 0.075, deducao: 169.44  },
-        { ate: 3751.05,  aliquota: 0.15,  deducao: 381.44  },
-        { ate: 4664.68,  aliquota: 0.225, deducao: 662.77  },
-        { ate: 99999999, aliquota: 0.275, deducao: 896.00  },
+        { ate: 2259.20, aliquota: 0, deducao: 0 },
+        { ate: 2826.65, aliquota: 0.075, deducao: 169.44 },
+        { ate: 3751.05, aliquota: 0.15, deducao: 381.44 },
+        { ate: 4664.68, aliquota: 0.225, deducao: 662.77 },
+        { ate: 99999999, aliquota: 0.275, deducao: 896.00 },
       ],
       tabelaInss: [
-        { ate: 1412.00,  aliquota: 0.075 },
-        { ate: 2666.68,  aliquota: 0.09  },
-        { ate: 4000.03,  aliquota: 0.12  },
-        { ate: 7786.02,  aliquota: 0.14  },
+        { ate: 1412.00, aliquota: 0.075 },
+        { ate: 2666.68, aliquota: 0.09 },
+        { ate: 4000.03, aliquota: 0.12 },
+        { ate: 7786.02, aliquota: 0.14 },
       ],
     },
     update: {},

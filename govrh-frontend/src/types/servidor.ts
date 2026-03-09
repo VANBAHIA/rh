@@ -197,6 +197,8 @@ export interface ServidorResumo {
     nivelSalarial: { nivel: string; classe: string; vencimentoBase: number }
   }>
   contatos: Array<{ tipo: string; valor: string }>
+  /** Escala de trabalho atualmente ativa — carregada sob demanda no perfil */
+  escalaAtiva?: import('./ponto').ServidorEscala | null
 }
 
 export interface HistoricoItem {

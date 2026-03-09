@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, Edit, Plus, Trash2, Star, Phone, Mail, MapPin,
-  Briefcase, User, Loader2, Check, X, Save, ChevronDown, AlertTriangle,
+  Briefcase, User, Loader2, Check, X, Save, ChevronDown, AlertTriangle, History,
+  ChevronLeft, ChevronRight, Clock, CalendarDays,
 } from 'lucide-react'
 import { servidoresApi } from '@/services/servidores'
 import { cargosApi } from '@/services/modules'
@@ -662,13 +663,317 @@ function VinculosPanel({ vinculos, servidorId }: { vinculos: VinculoFuncional[];
 
 // ── PÁGINA PRINCIPAL ──────────────────────────────────────────────────────────
 
-type Tab = 'funcional' | 'pessoal' | 'contatos' | 'enderecos'
+// Removido: declaração duplicada do tipo Tab
+type Tab = 'funcional' | 'pessoal' | 'contatos' | 'enderecos' | 'escala'
 const TABS: { id: Tab; label: string; icon: React.ElementType }[] = [
   { id: 'funcional',  label: 'Vínculos',       icon: Briefcase },
   { id: 'pessoal',    label: 'Dados pessoais', icon: User      },
   { id: 'contatos',   label: 'Contatos',       icon: Phone     },
   { id: 'enderecos',  label: 'Endereços',      icon: MapPin    },
+  { id: 'escala',     label: 'Escala',         icon: Star      },
 ]
+
+// ── PANEL ESCALA ────────────────────────────────────────────────────────────
+
+const TIPO_LABELS: Record<string, string> = {
+  INTEGRAL: 'Integral', MANHA: 'Manhã', TARDE: 'Tarde', NOTURNO: 'Noturno',
+  PLANTAO_12_36: 'Plantão 12x36', PLANTAO_24_72: 'Plantão 24x72', PERSONALIZADO: 'Personalizado',
+}
+
+function TipoBadge({ tipo }: { tipo: string }) {
+  const colors: Record<string, { bg: string; color: string }> = {
+    INTEGRAL:       { bg: '#eff6ff', color: '#1d4ed8' },
+    MANHA:          { bg: '#fefce8', color: '#a16207' },
+    TARDE:          { bg: '#fff7ed', color: '#c2410c' },
+    NOTURNO:        { bg: '#f5f3ff', color: '#6d28d9' },
+    PLANTAO_12_36:  { bg: '#f0fdf4', color: '#15803d' },
+    PLANTAO_24_72:  { bg: '#ecfdf5', color: '#065f46' },
+    PERSONALIZADO:  { bg: '#fdf4ff', color: '#7e22ce' },
+  }
+  const c = colors[tipo] ?? { bg: '#f1f5f9', color: '#475569' }
+  return (
+    <span style={{
+      background: c.bg, color: c.color,
+      fontSize: 10, fontWeight: 700, padding: '2px 7px',
+      borderRadius: 99, letterSpacing: '0.03em', whiteSpace: 'nowrap',
+    }}>
+      {TIPO_LABELS[tipo] ?? tipo}
+    </span>
+  )
+}
+
+function EscalaPanel({ servidorId }: { servidorId: string }) {
+  const { toast } = useToast()
+
+  // escala atual
+  const [escala, setEscala]               = useState<any>(null)
+  const [loading, setLoading]             = useState(true)
+
+  // formulário de vínculo
+  const [escalasAtivas, setEscalasAtivas] = useState<any[]>([])
+  const [loadingEscalas, setLoadingEscalas] = useState(false)
+  const [saving, setSaving]               = useState(false)
+  const [edit, setEdit]                   = useState(false)
+  const [form, setForm]                   = useState({ escalaId: '', dataInicio: '', motivoAlteracao: '' })
+
+  // histórico
+  const [historico, setHistorico]         = useState<any[]>([])
+  const [histPage, setHistPage]           = useState(1)
+  const [histMeta, setHistMeta]           = useState({ total: 0, totalPages: 1 })
+  const [loadingHist, setLoadingHist]     = useState(false)
+  const HIST_LIMIT = 5
+
+  const carregarEscala = useCallback(async () => {
+    setLoading(true)
+    try {
+      const { data: r } = await servidoresApi.obterEscala(servidorId)
+      setEscala((r as any).data ?? r ?? null)
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Erro ao carregar escala', description: extractApiError(e) })
+    } finally { setLoading(false) }
+  }, [servidorId])
+
+  const carregarHistorico = useCallback(async (page: number) => {
+    setLoadingHist(true)
+    try {
+      const { data: r } = await servidoresApi.historicoEscalas(servidorId, { page, limit: HIST_LIMIT })
+      const payload = (r as any).data ?? r ?? {}
+      setHistorico(payload.data ?? payload ?? [])
+      setHistMeta({
+        total:      payload.meta?.total      ?? payload.total      ?? 0,
+        totalPages: payload.meta?.totalPages ?? payload.totalPages ?? 1,
+      })
+    } catch {
+      // silencioso — histórico é secundário
+    } finally { setLoadingHist(false) }
+  }, [servidorId])
+
+  useEffect(() => { carregarEscala() }, [carregarEscala])
+  useEffect(() => { carregarHistorico(histPage) }, [carregarHistorico, histPage])
+
+  const abrirForm = async () => {
+    setEdit(true)
+    setLoadingEscalas(true)
+    try {
+      const { data: r } = await servidoresApi.listarEscalas({ ativo: true })
+      setEscalasAtivas((r as any).data ?? r ?? [])
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Erro ao listar escalas', description: extractApiError(e) })
+    } finally { setLoadingEscalas(false) }
+  }
+
+  const salvar = async () => {
+    if (!form.escalaId)  { toast({ variant: 'destructive', title: 'Selecione uma escala.' }); return }
+    if (!form.dataInicio){ toast({ variant: 'destructive', title: 'Informe a data de início.' }); return }
+    setSaving(true)
+    try {
+      await servidoresApi.vincularEscala(servidorId, {
+        escalaId:   form.escalaId,
+        dataInicio: form.dataInicio,
+        ...(form.motivoAlteracao ? { motivoAlteracao: form.motivoAlteracao } : {}),
+      })
+      toast({ title: 'Escala vinculada com sucesso.' })
+      setEdit(false)
+      setForm({ escalaId: '', dataInicio: '', motivoAlteracao: '' })
+      await carregarEscala()
+      setHistPage(1)
+      await carregarHistorico(1)
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Erro ao vincular escala', description: extractApiError(e) })
+    } finally { setSaving(false) }
+  }
+
+  const nomeEscala = escala?.escala?.nome ?? escala?.escala?.tipo ?? '—'
+  const tipoEscala = escala?.escala?.tipo ?? '—'
+  const dataInicio = escala?.dataInicio ? new Date(escala.dataInicio).toLocaleDateString('pt-BR') : '—'
+  const dataFim    = escala?.dataFim    ? new Date(escala.dataFim).toLocaleDateString('pt-BR')    : 'Em aberto'
+
+  if (loading) return <p style={{ color: '#94a3b8', fontSize: 13 }}>Carregando…</p>
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+      {/* ── Escala atual ───────────────────────────── */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+          <CalendarDays size={14} color="#6366f1" />
+          <span style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Escala atual
+          </span>
+        </div>
+
+        {escala ? (
+          <div style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 10, padding: '12px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#0c4a6e' }}>{nomeEscala}</span>
+                  <TipoBadge tipo={tipoEscala} />
+                  <span style={{ background: '#dcfce7', color: '#166534', fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 99 }}>
+                    ATIVA
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 11, color: '#0369a1', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Clock size={11} /> Início: <strong>{dataInicio}</strong>
+                  </span>
+                  <span style={{ fontSize: 11, color: '#0369a1', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <Clock size={11} /> Fim: <strong>{dataFim}</strong>
+                  </span>
+                </div>
+              </div>
+              <button style={S.btnOutline} onClick={abrirForm}>Alterar escala</button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <div style={S.emptyBox}>Nenhuma escala vinculada</div>
+            {!edit && (
+              <button style={{ ...S.btnOutline, alignSelf: 'flex-start' }} onClick={abrirForm}>
+                <Plus size={14} /> Vincular escala
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Formulário de vínculo ───────────────────── */}
+      {edit && (
+        <div style={S.formBox}>
+          <p style={{ fontSize: 12, fontWeight: 700, color: '#3730a3', margin: 0 }}>Vincular nova escala</p>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10 }}>
+            <div>
+              <label style={S.label}>Escala</label>
+              {loadingEscalas ? (
+                <div style={{ ...S.input, display: 'flex', alignItems: 'center', gap: 6, color: '#94a3b8' }}>
+                  <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> Carregando…
+                </div>
+              ) : (
+                <select value={form.escalaId} onChange={e => setForm(f => ({ ...f, escalaId: e.target.value }))} style={{ ...S.input, cursor: 'pointer' }}>
+                  <option value="">Selecione uma escala…</option>
+                  {escalasAtivas.map((e: any) => (
+                    <option key={e.id} value={e.id}>{e.nome ?? e.tipo ?? e.id}{e.tipo ? ` — ${e.tipo}` : ''}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+            <div>
+              <label style={S.label}>Data de início *</label>
+              <input type="date" value={form.dataInicio} onChange={e => setForm(f => ({ ...f, dataInicio: e.target.value }))} style={S.input} />
+            </div>
+            <div>
+              <label style={S.label}>Motivo (opcional)</label>
+              <input value={form.motivoAlteracao} onChange={e => setForm(f => ({ ...f, motivoAlteracao: e.target.value }))} style={S.input} placeholder="Ex: Readaptação de jornada" />
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button style={S.btnOutline} onClick={() => { setEdit(false); setForm({ escalaId: '', dataInicio: '', motivoAlteracao: '' }) }}>
+              <X size={13} /> Cancelar
+            </button>
+            <button style={S.btnPrimary} onClick={salvar} disabled={saving || loadingEscalas}>
+              {saving ? <Loader2 size={13} /> : <Save size={13} />} Salvar
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Histórico ──────────────────────────────── */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}>
+          <History size={14} color="#6366f1" />
+          <span style={{ fontSize: 12, fontWeight: 700, color: '#0f172a', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Histórico de escalas
+          </span>
+          {histMeta.total > 0 && (
+            <span style={{ background: '#e0e7ff', color: '#4338ca', fontSize: 10, fontWeight: 700, padding: '1px 7px', borderRadius: 99 }}>
+              {histMeta.total}
+            </span>
+          )}
+        </div>
+
+        {loadingHist ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#94a3b8', fontSize: 12, padding: '8px 0' }}>
+            <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} /> Carregando histórico…
+          </div>
+        ) : historico.length === 0 ? (
+          <div style={{ ...S.emptyBox, fontSize: 12 }}>Nenhum histórico registrado</div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {historico.map((h: any, i: number) => {
+                const nome   = h.escala?.nome ?? h.escala?.tipo ?? '—'
+                const tipo   = h.escala?.tipo ?? '—'
+                const inicio = h.dataInicio ? new Date(h.dataInicio).toLocaleDateString('pt-BR') : '—'
+                const fim    = h.dataFim    ? new Date(h.dataFim).toLocaleDateString('pt-BR')    : 'Em aberto'
+                const ativa  = h.ativa === true
+
+                return (
+                  <div key={h.id ?? i} style={{
+                    background: ativa ? '#f0fdf4' : '#f8fafc',
+                    border: `1px solid ${ativa ? '#bbf7d0' : '#e2e8f0'}`,
+                    borderRadius: 8, padding: '10px 12px',
+                    display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
+                    gap: 10, flexWrap: 'wrap',
+                  }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 12, fontWeight: 600, color: '#0f172a' }}>{nome}</span>
+                        <TipoBadge tipo={tipo} />
+                        {ativa && (
+                          <span style={{ background: '#dcfce7', color: '#166534', fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 99 }}>
+                            ATIVA
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: 11, color: '#64748b' }}>
+                          Início: <strong>{inicio}</strong>
+                        </span>
+                        <span style={{ fontSize: 11, color: '#64748b' }}>
+                          Fim: <strong>{fim}</strong>
+                        </span>
+                        {h.motivoAlteracao && (
+                          <span style={{ fontSize: 11, color: '#94a3b8', fontStyle: 'italic' }}>
+                            "{h.motivoAlteracao}"
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Paginação */}
+            {histMeta.totalPages > 1 && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 10 }}>
+                <span style={{ fontSize: 11, color: '#94a3b8' }}>
+                  Página {histPage} de {histMeta.totalPages} · {histMeta.total} registro{histMeta.total !== 1 ? 's' : ''}
+                </span>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <button
+                    onClick={() => setHistPage(p => Math.max(1, p - 1))}
+                    disabled={histPage === 1}
+                    style={{ ...S.btnOutline, padding: '3px 8px', opacity: histPage === 1 ? 0.4 : 1 }}
+                  >
+                    <ChevronLeft size={13} />
+                  </button>
+                  <button
+                    onClick={() => setHistPage(p => Math.min(histMeta.totalPages, p + 1))}
+                    disabled={histPage >= histMeta.totalPages}
+                    style={{ ...S.btnOutline, padding: '3px 8px', opacity: histPage >= histMeta.totalPages ? 0.4 : 1 }}
+                  >
+                    <ChevronRight size={13} />
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
 
 export default function ServidorDetalhe() {
   const { id } = useParams<{ id: string }>()
@@ -706,7 +1011,6 @@ export default function ServidorDetalhe() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 960 }}>
-
       {showModalExcluir && servidor && (
         <ModalExcluirServidor
           nome={servidor.nome}
@@ -715,7 +1019,6 @@ export default function ServidorDetalhe() {
           loading={excluindo}
         />
       )}
-
       {/* Toolbar */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
         <button style={{ ...S.btnOutline, padding: '6px 12px' }} onClick={() => navigate('/servidores')}>
@@ -734,7 +1037,6 @@ export default function ServidorDetalhe() {
           )}
         </div>
       </div>
-
       {/* Header */}
       {loading ? (
         <div style={{ ...S.card, display: 'flex', gap: 20 }}>
@@ -773,7 +1075,6 @@ export default function ServidorDetalhe() {
               </div>
             </div>
           </div>
-
           {/* Tabs */}
           <div style={{ display: 'flex', borderTop: '1px solid #e2e8f0', overflowX: 'auto' }}>
             {TABS.map(({ id: tabId, label, icon: Icon }) => (
@@ -786,7 +1087,6 @@ export default function ServidorDetalhe() {
       ) : (
         <div style={{ ...S.card, textAlign: 'center', color: '#94a3b8', padding: 48 }}>Servidor não encontrado.</div>
       )}
-
       {/* Conteúdo das abas */}
       {!loading && servidor && (
         <div style={S.card}>
@@ -804,6 +1104,7 @@ export default function ServidorDetalhe() {
           )}
           {activeTab === 'contatos'  && id && <ContatosPanel   servidorId={id} />}
           {activeTab === 'enderecos' && id && <EnderecosPanel  servidorId={id} />}
+          {activeTab === 'escala'    && id && <EscalaPanel     servidorId={id} />}
         </div>
       )}
     </div>

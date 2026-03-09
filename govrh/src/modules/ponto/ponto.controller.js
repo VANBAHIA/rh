@@ -18,6 +18,9 @@ class PontoController {
   async atualizarEscala(req, res, next) {
     try { ok(res, await this.service.atualizarEscala(req.tenantId, req.params.id, req.body)); } catch (e) { next(e); }
   }
+  async excluirEscala(req, res, next) {
+    try { noContent(res, await this.service.excluirEscala(req.tenantId, req.params.id)); } catch (e) { next(e); }
+  }
   async vincularServidorEscala(req, res, next) {
     try { ok(res, await this.service.vincularServidorEscala(req.tenantId, req.params.id, req.body)); } catch (e) { next(e); }
   }
@@ -26,6 +29,20 @@ class PontoController {
   }
   async lancar(req, res, next) {
     try { created(res, await this.service.lancar(req.tenantId, req.body)); } catch (e) { next(e); }
+  }
+  async bater(req, res, next) {
+    try {
+      const { servidorId, data, hora } = req.body;
+      const batida = await this.service.bater(req.tenantId, { servidorId, data, hora });
+      created(res, batida);
+    } catch (e) { next(e); }
+  }
+  // Valida escala e horário ANTES de registrar — chamado pelo terminal de ponto
+  async validarBatida(req, res, next) {
+    try {
+      const { servidorId, data, hora } = req.body;
+      ok(res, await this.service.validarBatida(req.tenantId, { servidorId, data, hora }));
+    } catch (e) { next(e); }
   }
   async importar(req, res, next) {
     try { ok(res, await this.service.importar(req.tenantId, req.body)); } catch (e) { next(e); }

@@ -1,10 +1,21 @@
 const prisma = require('../../config/prisma');
 const { Errors } = require('../../shared/errors/AppError');
 
-// Licenças que suspendem a remuneração
 const LICENCAS_SEM_ONUS = ['SEM_VENCIMENTOS'];
-// Licenças que alteram situação funcional
 const LICENCAS_AFASTAMENTO = ['MANDATO_ELETIVO', 'CAPACITACAO', 'SEM_VENCIMENTOS'];
+
+const servidorSelectBasico = {
+  matricula: true,
+  nome: true,
+  vinculos: {
+    where: { atual: true },
+    take: 1,
+    select: {
+      cargo: { select: { nome: true } },
+      lotacao: { select: { nome: true, sigla: true } },
+    },
+  },
+};
 
 class LicencasService {
 
@@ -12,14 +23,29 @@ class LicencasService {
     const where = { servidor: { tenantId } };
     if (query.tipo)   where.tipo   = query.tipo;
     if (query.status) where.status = query.status;
-    if (query.lotacaoId) where.servidor = { ...where.servidor, lotacaoId: query.lotacaoId };
+    if (query.lotacaoId) {
+      where.servidor = {
+        tenantId,
+        vinculos: { some: { atual: true, lotacaoId: query.lotacaoId } },
+      };
+    }
 
     const [dados, total] = await prisma.$transaction([
       prisma.licenca.findMany({
         where, skip, take,
         orderBy: { dataInicio: 'desc' },
         include: {
-          servidor: { select: { matricula: true, nome: true, lotacao: { select: { nome: true } } } },
+          servidor: {
+            select: {
+              matricula: true,
+              nome: true,
+              vinculos: {
+                where: { atual: true },
+                take: 1,
+                select: { lotacao: { select: { nome: true, sigla: true } } },
+              },
+            },
+          },
         },
       }),
       prisma.licenca.count({ where }),
@@ -40,7 +66,6 @@ class LicencasService {
     const srv = await prisma.servidor.findFirst({ where: { id: dados.servidorId, tenantId } });
     if (!srv) throw Errors.NOT_FOUND('Servidor');
 
-    // Verifica sobreposição de licenças ativas
     if (dados.dataInicio && dados.dataFim) {
       const sobreposicao = await prisma.licenca.findFirst({
         where: {
@@ -55,13 +80,15 @@ class LicencasService {
 
     const comOnus = !LICENCAS_SEM_ONUS.includes(dados.tipo);
     const licenca = await prisma.licenca.create({
-      data: { ...dados, comOnus, status: 'PENDENTE',
+      data: {
+        ...dados,
+        comOnus,
+        status: 'PENDENTE',
         dataInicio: new Date(dados.dataInicio),
         dataFim: dados.dataFim ? new Date(dados.dataFim) : null,
       },
     });
 
-    // Cria workflow de aprovação
     await prisma.solicitacaoAprovacao.create({
       data: {
         tenantId, servidorId: dados.servidorId,
@@ -79,7 +106,7 @@ class LicencasService {
     const licenca = await prisma.licenca.findFirst({
       where: { id, servidor: { tenantId } },
       include: {
-        servidor: { select: { matricula: true, nome: true, cargo: { select: { nome: true } }, lotacao: { select: { nome: true } } } },
+        servidor: { select: servidorSelectBasico },
         solicitacao: true,
       },
     });
@@ -96,15 +123,26 @@ class LicencasService {
     const licenca = await this.buscar(tenantId, id);
     if (licenca.status !== 'PENDENTE') throw Errors.VALIDATION('Apenas licenças pendentes podem ser aprovadas.');
 
-    const [licencaAtual] = await prisma.$transaction([
+    const ops = [
       prisma.licenca.update({ where: { id }, data: { status: 'APROVADO', portaria } }),
-      // Altera situação funcional se necessário
-      ...(LICENCAS_AFASTAMENTO.includes(licenca.tipo)
-        ? [prisma.servidor.update({ where: { id: licenca.servidorId }, data: { situacaoFuncional: 'AFASTADO' } })]
-        : []),
       prisma.solicitacaoAprovacao.updateMany({ where: { licencaId: id }, data: { status: 'APROVADO' } }),
-    ]);
+    ];
 
+    if (LICENCAS_AFASTAMENTO.includes(licenca.tipo)) {
+      const vinculo = await prisma.vinculoFuncional.findFirst({
+        where: { servidorId: licenca.servidorId, atual: true },
+      });
+      if (vinculo) {
+        ops.push(
+          prisma.vinculoFuncional.update({
+            where: { id: vinculo.id },
+            data: { situacaoFuncional: 'AFASTADO' },
+          })
+        );
+      }
+    }
+
+    const [licencaAtual] = await prisma.$transaction(ops);
     return licencaAtual;
   }
 
@@ -112,14 +150,28 @@ class LicencasService {
     const licenca = await this.buscar(tenantId, id);
     if (licenca.status !== 'APROVADO') throw Errors.VALIDATION('Apenas licenças aprovadas podem ser encerradas.');
 
-    await prisma.$transaction([
-      prisma.licenca.update({ where: { id }, data: { status: 'ENCERRADA', dataFim: new Date(dataFimReal), observacao } }),
-      // Restaura situação ativa
-      ...(LICENCAS_AFASTAMENTO.includes(licenca.tipo)
-        ? [prisma.servidor.update({ where: { id: licenca.servidorId }, data: { situacaoFuncional: 'ATIVO' } })]
-        : []),
-    ]);
+    const ops = [
+      prisma.licenca.update({
+        where: { id },
+        data: { status: 'ENCERRADA', dataFim: new Date(dataFimReal), observacao },
+      }),
+    ];
 
+    if (LICENCAS_AFASTAMENTO.includes(licenca.tipo)) {
+      const vinculo = await prisma.vinculoFuncional.findFirst({
+        where: { servidorId: licenca.servidorId, atual: true },
+      });
+      if (vinculo) {
+        ops.push(
+          prisma.vinculoFuncional.update({
+            where: { id: vinculo.id },
+            data: { situacaoFuncional: 'ATIVO' },
+          })
+        );
+      }
+    }
+
+    await prisma.$transaction(ops);
     return prisma.licenca.findUnique({ where: { id } });
   }
 
@@ -144,12 +196,25 @@ class LicencasService {
 
     return prisma.licenca.findMany({
       where: {
-        servidor: { tenantId, situacaoFuncional: 'AFASTADO' },
+        servidor: {
+          tenantId,
+          vinculos: { some: { atual: true, situacaoFuncional: 'AFASTADO' } },
+        },
         status: 'APROVADO',
         dataFim: { gte: new Date(), lte: limite },
       },
       include: {
-        servidor: { select: { matricula: true, nome: true, lotacao: { select: { nome: true } } } },
+        servidor: {
+          select: {
+            matricula: true,
+            nome: true,
+            vinculos: {
+              where: { atual: true },
+              take: 1,
+              select: { lotacao: { select: { nome: true, sigla: true } } },
+            },
+          },
+        },
       },
       orderBy: { dataFim: 'asc' },
     });

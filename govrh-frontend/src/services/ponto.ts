@@ -1,27 +1,15 @@
 import api from './api'
 
-// ── Ponto & Escalas ───────────────────────────────────────────────────────
-// Backend:
-//   ponto/escalas                     GET, POST
-//   ponto/espelho/:servidorId/:mes    GET  ← era /ponto/resumo (ERRADO)
-//   ponto/lancamento                  POST ← era /ponto/ocorrencias (ERRADO)
-//   ponto/banco-horas/:servidorId     GET
-//   ponto/pendencias                  GET
-
 export const pontoApi = {
-  // Espelho de ponto do servidor no mês (AAAA-MM)
   espelho: (servidorId: string, mes: string) =>
     api.get(`/ponto/espelho/${servidorId}/${mes}`),
 
-  // Banco de horas
   bancoHoras: (servidorId: string) =>
     api.get(`/ponto/banco-horas/${servidorId}`),
 
-  // Pendências para aprovação
   pendencias: (params?: Record<string, string>) =>
     api.get('/ponto/pendencias', { params }),
 
-  // Lançamento de ponto (entrada/saída) – payload esperado pela API de cálculo completo
   lancamento: (payload: {
     servidorId: string
     data: string
@@ -31,11 +19,14 @@ export const pontoApi = {
     justificativa?: string
   }) => api.post('/ponto/lancamento', payload),
 
-  // Batida simples utilizada pelo terminal de ponto
   bater: (payload: { servidorId: string; data: string; hora: string }) =>
     api.post('/ponto/bater', payload),
 
-  // Escalas
+  // Valida escala e horário ANTES de confirmar o ponto.
+  // Retorna: { permitido, motivo?, mensagem?, tipoBatida?, horarioEsperado?, aviso? }
+  validarBatida: (payload: { servidorId: string; data: string; hora: string }) =>
+    api.post('/ponto/validar-batida', payload),
+
   escalas: () => api.get('/ponto/escalas'),
 
   criarEscala: (payload: {

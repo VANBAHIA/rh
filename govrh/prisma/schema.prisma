@@ -682,6 +682,7 @@ model Servidor {
   documentosAssinar DocumentoAssinatura[]  @relation("DocumentoServidor")
   assinaturas       AssinaturaDigital[]
   consignados       Consignado[]
+  escalas           ServidorEscala[]
 
   @@unique([tenantId, matricula])
   @@unique([tenantId, cpf])
@@ -1115,43 +1116,66 @@ model GratificacaoFuncao {
 // =============================================================
 
 model EscalaTrabalho {
-  id                    String        @id @default(uuid())
-  tenantId              String?
-  nome                  String        @db.VarChar(100)
-  descricao             String?       @db.VarChar(500) // Nova: Descrição da escala
-  tipo                  String        @db.VarChar(30) @default("FIXO") // FIXO, REVEZAMENTO, PLANTAO_12x36, PLANTAO_24x48
-  cargaHorariaSemanal   Decimal       @db.Decimal(5, 2) @default(40) // Nova: Carga horária semanal (40h, 44h, etc)
-  turnos                Json // Nova: Array de { diaSemana, entrada, saida, almoco } individualizados por dia
-  
-  // Campos legados (mantidos para compatibilidade com dados antigos)
-  turno                 TurnoTrabalho? // DEPRECATED
-  horaEntrada           String?       @db.VarChar(5) // DEPRECATED
-  horaSaida             String?       @db.VarChar(5) // DEPRECATED
-  intervaloMin          Int           @default(60)
-  horasDiarias          Decimal?      @db.Decimal(4, 2) // DEPRECATED
-  diasSemana            Json? // DEPRECATED
-  toleranciaAtraso      Int           @default(10)
-  
-  createdAt             DateTime      @default(now())
-  updatedAt             DateTime      @updatedAt
+  id                  String        @id @default(uuid())
+  tenantId            String        // obrigatório — escala sempre pertence a um tenant
+  nome                String        @db.VarChar(100)
+  descricao           String?       @db.VarChar(500)
+  tipo                String        @default("FIXO") @db.VarChar(30) // FIXO, REVEZAMENTO, PLANTAO_12x36, PLANTAO_24x48
+  cargaHorariaSemanal Decimal       @default(40) @db.Decimal(5, 2)
+  // Array de objetos: { diaSemana: 1-7, entrada: "HH:mm", saida: "HH:mm", intervaloMin: 60 }
+  // Para escalas de revezamento, cada ciclo é um item do array
+  turnos              Json
+  toleranciaAtraso    Int           @default(10) // minutos de tolerância no ponto
+  avisosBatida        Json?         
+  ativo               Boolean       @default(true)
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  // Campos legados — mantidos apenas para leitura de dados históricos
+  // NÃO usar em novos registros
+  turno       TurnoTrabalho? // @deprecated
+  horaEntrada String?        @db.VarChar(5) // @deprecated
+  horaSaida   String?        @db.VarChar(5) // @deprecated
+  horasDiarias Decimal?      @db.Decimal(4, 2) // @deprecated
+  intervaloMin Int           @default(60) // @deprecated — use turnos[].intervaloMin
+  diasSemana  Json? // @deprecated
 
   registrosPonto RegistroPonto[]
   servidores     ServidorEscala[]
 
+  @@index([tenantId])
+  @@index([tenantId, ativo])
   @@map("escalas_trabalho")
 }
 
+// ─────────────────────────────────────────────────────────────
+// VÍNCULO SERVIDOR ↔ ESCALA
+// Histórico completo de escalas do servidor.
+// Regra de negócio: um servidor ATIVO deve ter sempre exatamente
+// um registro com ativa = true. Enforced na camada de serviço.
+// ─────────────────────────────────────────────────────────────
 model ServidorEscala {
   id         String    @id @default(uuid())
+  tenantId   String
   servidorId String
   escalaId   String
   dataInicio DateTime  @db.Date
-  dataFim    DateTime? @db.Date
-  ativo      Boolean   @default(true)
+  dataFim    DateTime? @db.Date  // preenchido ao encerrar — null somente no registro ativo
+  ativa      Boolean   @default(true)
 
-  escala EscalaTrabalho @relation(fields: [escalaId], references: [id])
+  // Rastreabilidade
+  motivoAlteracao String? @db.VarChar(200)
+  registradoPor   String? @db.VarChar(150) // usuarioId
 
-  @@index([servidorId])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  servidor Servidor       @relation(fields: [servidorId], references: [id])
+  escala   EscalaTrabalho @relation(fields: [escalaId], references: [id])
+
+  @@index([servidorId, ativa])
+  @@index([tenantId, ativa])
+  @@index([escalaId])
   @@map("servidores_escalas")
 }
 

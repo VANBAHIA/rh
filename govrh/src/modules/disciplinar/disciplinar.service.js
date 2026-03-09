@@ -1,12 +1,11 @@
 const prisma = require('../../config/prisma');
 const { Errors } = require('../../shared/errors/AppError');
 
-// Penalidades que alteram situação funcional
 const PENALIDADES_SITUACAO = {
-  DEMISSAO:         'EXONERADO',
-  CASSACAO:         'EXONERADO',
-  DESTITUICAO:      'EXONERADO',
-  SUSPENSAO:        'SUSPENSO',
+  DEMISSAO:    'EXONERADO',
+  CASSACAO:    'EXONERADO',
+  DESTITUICAO: 'EXONERADO',
+  SUSPENSAO:   'SUSPENSO',
 };
 
 class DisciplinarService {
@@ -20,9 +19,19 @@ class DisciplinarService {
     const [dados, total] = await prisma.$transaction([
       prisma.processoDisciplinar.findMany({
         where, skip, take,
-        orderBy: { dataAbertura: 'desc' },
+        orderBy: { dataInstauracao: 'desc' },
         include: {
-          servidor: { select: { matricula: true, nome: true, lotacao: { select: { nome: true } } } },
+          servidor: {
+            select: {
+              matricula: true,
+              nome: true,
+              vinculos: {
+                where: { atual: true },
+                take: 1,
+                select: { lotacao: { select: { nome: true } } },
+              },
+            },
+          },
           _count: { select: { documentos: true } },
         },
       }),
@@ -35,18 +44,19 @@ class DisciplinarService {
     const srv = await prisma.servidor.findFirst({ where: { id: dados.servidorId, tenantId } });
     if (!srv) throw Errors.NOT_FOUND('Servidor');
 
-    // Gera número de processo automático: ANO/SEQUENCIAL/TIPO
     const ano = new Date().getFullYear();
     const count = await prisma.processoDisciplinar.count({ where: { tenantId } });
     const numero = `${String(count + 1).padStart(4, '0')}/${ano}/${dados.tipo}`;
 
+    const { dataAbertura, ...restDados } = dados;
+
     return prisma.processoDisciplinar.create({
       data: {
-        ...dados,
+        ...restDados,
         tenantId,
         numero,
         status: 'INSTAURADO',
-        dataAbertura: dados.dataAbertura ? new Date(dados.dataAbertura) : new Date(),
+        dataInstauracao: dataAbertura ? new Date(dataAbertura) : new Date(),
       },
     });
   }
@@ -55,7 +65,20 @@ class DisciplinarService {
     const p = await prisma.processoDisciplinar.findFirst({
       where: { id, tenantId },
       include: {
-        servidor: { select: { matricula: true, nome: true, cargo: { select: { nome: true } }, lotacao: { select: { nome: true } } } },
+        servidor: {
+          select: {
+            matricula: true,
+            nome: true,
+            vinculos: {
+              where: { atual: true },
+              take: 1,
+              select: {
+                cargo:   { select: { nome: true } },
+                lotacao: { select: { nome: true } },
+              },
+            },
+          },
+        },
         documentos: { orderBy: { createdAt: 'asc' } },
       },
     });
@@ -71,7 +94,7 @@ class DisciplinarService {
   async addDocumento(tenantId, id, { tipo, descricao, url, dataDocumento }) {
     await this.buscar(tenantId, id);
     return prisma.docProcessoDisciplinar.create({
-      data: { processoId: id, tipo, descricao, url, dataDocumento: dataDocumento ? new Date(dataDocumento) : new Date() },
+      data: { processoId: id, tipo, descricao, urlArquivo: url, dataDoc: dataDocumento ? new Date(dataDocumento) : new Date() },
     });
   }
 
@@ -90,37 +113,43 @@ class DisciplinarService {
 
     const novaSituacao = PENALIDADES_SITUACAO[penalidade];
 
-    await prisma.$transaction([
+    const ops = [
       prisma.processoDisciplinar.update({
         where: { id },
         data: {
-          status: 'JULGADO',
-          penalidade, portaria, fundamentacao,
-          dataAplicacao: dataAplicacao ? new Date(dataAplicacao) : new Date(),
+          status: 'JULGAMENTO',
+          penalidade, portariaJulg: portaria, descricaoFatos: fundamentacao,
+          dataEncerramento: dataAplicacao ? new Date(dataAplicacao) : new Date(),
           diasSuspensao: penalidade === 'SUSPENSAO' ? diasSuspensao : null,
         },
       }),
-      // Aplica impacto na situação funcional
-      ...(novaSituacao ? [
-        prisma.servidor.update({
-          where: { id: proc.servidorId },
-          data: {
-            situacaoFuncional: novaSituacao,
-            ...(novaSituacao === 'EXONERADO' ? { motivoExoneracao: `Penalidade: ${penalidade}. Portaria: ${portaria}` } : {}),
-          },
-        }),
-        prisma.historicoFuncional.create({
-          data: {
-            servidorId: proc.servidorId, tenantId,
-            dataAlteracao: new Date(),
-            tipoAlteracao: 'PENALIDADE',
-            descricao: `${penalidade} aplicada via Processo ${proc.numero}. Portaria: ${portaria}`,
-            situacaoNova: novaSituacao,
-          },
-        }),
-      ] : []),
-    ]);
+    ];
 
+    if (novaSituacao) {
+      const vinculo = await prisma.vinculoFuncional.findFirst({
+        where: { servidorId: proc.servidorId, atual: true },
+      });
+
+      if (vinculo) {
+        const updateVinculo = {
+          situacaoFuncional: novaSituacao,
+          tipoAlteracao:     novaSituacao === 'EXONERADO' ? 'EXONERACAO' : 'SUSPENSAO',
+        };
+
+        if (novaSituacao === 'EXONERADO') {
+          updateVinculo.motivoEncerramento = `Penalidade: ${penalidade}. Portaria: ${portaria}`;
+          updateVinculo.dataEncerramento   = new Date();
+          updateVinculo.portaria           = portaria;
+          updateVinculo.atual              = false;
+        }
+
+        ops.push(
+          prisma.vinculoFuncional.update({ where: { id: vinculo.id }, data: updateVinculo })
+        );
+      }
+    }
+
+    await prisma.$transaction(ops);
     return prisma.processoDisciplinar.findUnique({ where: { id } });
   }
 

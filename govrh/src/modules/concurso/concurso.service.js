@@ -3,7 +3,6 @@ const { Errors } = require('../../shared/errors/AppError');
 const { gerarMatricula } = require('../../shared/utils/matricula');
 const { mesesEntreatas } = require('../../shared/utils/date');
 
-// Meses de estágio probatório por regime
 const MESES_ESTAGIO = { ESTATUTARIO: 36, CELETISTA: 3, TEMPORARIO: 3 };
 
 class ConcursoService {
@@ -11,12 +10,15 @@ class ConcursoService {
   async listar(tenantId, query = {}, skip = 0, take = 20) {
     const where = { tenantId };
     if (query.status) where.status = query.status;
-    if (query.ano)    where.ano    = parseInt(query.ano);
+    if (query.ano)    where.dataAbertura = {
+      gte: new Date(`${parseInt(query.ano)}-01-01`),
+      lte: new Date(`${parseInt(query.ano)}-12-31`),
+    };
 
     const [dados, total] = await prisma.$transaction([
       prisma.concursoPublico.findMany({
         where, skip, take,
-        orderBy: { ano: 'desc' },
+        orderBy: { dataAbertura: 'desc' },
         include: { _count: { select: { candidatos: true } } },
       }),
       prisma.concursoPublico.count({ where }),
@@ -45,9 +47,9 @@ class ConcursoService {
   async candidatos(tenantId, concursoId, query = {}, skip = 0, take = 20) {
     await this.buscar(tenantId, concursoId);
     const where = { concursoId };
-    if (query.status)      where.status      = query.status;
-    if (query.convocado !== undefined) where.convocado = query.convocado === 'true';
-    if (query.q) where.nome = { contains: query.q };
+    if (query.status)                  where.statusConvocacao = query.status;
+    if (query.convocado !== undefined)  where.convocado = query.convocado === 'true';
+    if (query.q)                       where.nome     = { contains: query.q };
 
     const [dados, total] = await prisma.$transaction([
       prisma.candidato.findMany({
@@ -66,11 +68,19 @@ class ConcursoService {
     const resultados = { importados: 0, erros: [] };
     for (const cand of candidatos) {
       try {
-        await prisma.candidato.upsert({
-          where: { concursoId_cpf: { concursoId, cpf: cand.cpf } },
-          create: { ...cand, concursoId, tenantId, status: 'CLASSIFICADO' },
-          update: { classificacao: cand.classificacao, nota: cand.nota },
+        const existente = await prisma.candidato.findFirst({
+          where: { concursoId, cpf: cand.cpf },
         });
+        if (existente) {
+          await prisma.candidato.update({
+            where: { id: existente.id },
+            data: { classificacao: cand.classificacao, nota: cand.nota },
+          });
+        } else {
+          await prisma.candidato.create({
+            data: { ...cand, concursoId, statusConvocacao: null },
+          });
+        }
         resultados.importados++;
       } catch (e) {
         resultados.erros.push({ cpf: cand.cpf, erro: e.message });
@@ -97,7 +107,7 @@ class ConcursoService {
       data: {
         convocado: true,
         dataConvocacao: new Date(dataConvocacao),
-        status: 'CONVOCADO',
+        statusConvocacao: 'CONVOCADO',
         observacao,
       },
     });
@@ -111,68 +121,57 @@ class ConcursoService {
       include: { concurso: true, cargo: true },
     });
     if (!cand) throw Errors.NOT_FOUND('Candidato');
-    if (cand.status === 'EMPOSSADO') throw Errors.VALIDATION('Candidato já empossado.');
+    if (cand.statusConvocacao === 'EMPOSSADO') throw Errors.VALIDATION('Candidato já empossado.');
 
-    // Busca tabela salarial ativa
     const tabelaAtiva = await prisma.tabelaSalarial.findFirst({ where: { tenantId, ativa: true } });
     if (!tabelaAtiva) throw Errors.VALIDATION('Nenhuma tabela salarial ativa cadastrada.');
 
     const matricula = await gerarMatricula(tenantId);
+    const regimeJuridico = 'ESTATUTARIO';
+    const mesesEstagio = MESES_ESTAGIO[regimeJuridico] || 36;
+    const dataFimEstagio = new Date(dataPosse);
+    dataFimEstagio.setMonth(dataFimEstagio.getMonth() + mesesEstagio);
 
-    // Cria o servidor a partir do candidato
     const servidor = await prisma.$transaction(async (tx) => {
       const srv = await tx.servidor.create({
         data: {
           tenantId,
           matricula,
           nome: cand.nome,
-          cpf: cand.cpf,
+          cpf:  cand.cpf,
           ...dadosPessoais,
-          cargoId: cand.cargoId,
-          tabelaSalarialId: tabelaAtiva.id,
-          nivelSalarialId,
-          lotacaoId,
-          regimeJuridico: cand.concurso.regimeJuridico || 'ESTATUTARIO',
-          situacaoFuncional: 'ATIVO',
-          dataAdmissao: new Date(dataPosse),
-          dataPosse: new Date(dataPosse),
-          dataExercicio: dataExercicio ? new Date(dataExercicio) : null,
         },
       });
 
-      // Atualiza candidato como empossado
-      await tx.candidato.update({
-        where: { id: candidatoId },
-        data: { status: 'EMPOSSADO', dataPosse: new Date(dataPosse), servidorId: srv.id },
+      await tx.vinculoFuncional.create({
+        data: {
+          servidorId:       srv.id,
+          tenantId,
+          regimeJuridico,
+          cargoId:          cand.cargoId,
+          tabelaSalarialId: tabelaAtiva.id,
+          nivelSalarialId,
+          lotacaoId,
+          situacaoFuncional: 'ATIVO',
+          tipoAlteracao:    'POSSE',
+          dataAdmissao:     new Date(dataPosse),
+          dataPosse:        new Date(dataPosse),
+          dataExercicio:    dataExercicio ? new Date(dataExercicio) : null,
+          atual:            true,
+        },
       });
 
-      // Cria estágio probatório
-      const mesesEstagio = MESES_ESTAGIO[srv.regimeJuridico] || 36;
-      const dataFimEstagio = new Date(dataPosse);
-      dataFimEstagio.setMonth(dataFimEstagio.getMonth() + mesesEstagio);
+      await tx.candidato.update({
+        where: { id: candidatoId },
+        data:  { statusConvocacao: 'EMPOSSADO', dataPosse: new Date(dataPosse), servidorId: srv.id },
+      });
 
       await tx.estagioProbatorio.create({
         data: {
           servidorId: srv.id,
-          tenantId,
           dataInicio: new Date(dataPosse),
-          dataFimPrevisto: dataFimEstagio,
-          status: 'EM_ANDAMENTO',
-        },
-      });
-
-      // Histórico
-      await tx.historicoFuncional.create({
-        data: {
-          servidorId: srv.id,
-          tenantId,
-          dataAlteracao: new Date(dataPosse),
-          tipoAlteracao: 'ADMISSAO',
-          descricao: `Posse e ingresso via Concurso Público ${cand.concurso.numero || cand.concurso.descricao}`,
-          cargoNovoId: cand.cargoId,
-          lotacaoNovaId: lotacaoId,
-          nivelSalarialNovoId: nivelSalarialId,
-          situacaoNova: 'ATIVO',
+          dataFim:    dataFimEstagio,
+          status:     'EM_CURSO',
         },
       });
 
@@ -183,27 +182,38 @@ class ConcursoService {
   }
 
   async estagiosEmAndamento(tenantId, query = {}, skip = 0, take = 20) {
-    const where = { tenantId, status: 'EM_ANDAMENTO' };
-
     const [dados, total] = await prisma.$transaction([
       prisma.estagioProbatorio.findMany({
-        where, skip, take,
+        where: { status: 'EM_CURSO', servidor: { tenantId } },
+        skip, take,
         include: {
           servidor: {
-            select: { matricula: true, nome: true, dataAdmissao: true,
-              cargo: { select: { nome: true } }, lotacao: { select: { nome: true } } },
+            select: {
+              matricula: true,
+              nome: true,
+              vinculos: {
+                where: { atual: true },
+                take: 1,
+                select: {
+                  dataAdmissao: true,
+                  cargo:   { select: { nome: true } },
+                  lotacao: { select: { nome: true } },
+                },
+              },
+            },
           },
           avaliacoes: { orderBy: { periodo: 'asc' } },
         },
-        orderBy: { dataFimPrevisto: 'asc' },
+        orderBy: { dataFim: 'asc' },
       }),
-      prisma.estagioProbatorio.count({ where }),
+      prisma.estagioProbatorio.count({
+        where: { status: 'EM_CURSO', servidor: { tenantId } },
+      }),
     ]);
 
-    // Adiciona meses decorridos e % de conclusão
     const dadosEnriquecidos = dados.map(e => {
       const mesesDecorridos = mesesEntreatas(e.dataInicio);
-      const mesesTotal = mesesEntreatas(e.dataInicio, e.dataFimPrevisto);
+      const mesesTotal      = mesesEntreatas(e.dataInicio, e.dataFim);
       return {
         ...e,
         mesesDecorridos,
@@ -214,51 +224,64 @@ class ConcursoService {
     return { dados: dadosEnriquecidos, total };
   }
 
-  async registrarAvaliacao(tenantId, servidorId, { periodo, nota, parecer, avaliadorId, dataAvaliacao }) {
+  async registrarAvaliacao(tenantId, servidorId, { periodo, notaGeral, resultado, avaliadorNome, dataAvaliacao, observacao }) {
     const estagio = await prisma.estagioProbatorio.findFirst({
-      where: { servidorId, tenantId, status: 'EM_ANDAMENTO' },
+      where: { servidorId, status: 'EM_CURSO', servidor: { tenantId } },
     });
     if (!estagio) throw Errors.NOT_FOUND('Estágio probatório em andamento');
 
-    // Verifica se período já foi avaliado
     const existente = await prisma.avaliacaoEstagio.findFirst({
-      where: { estagioProbatorioId: estagio.id, periodo },
+      where: { estagioProbId: estagio.id, periodo },
     });
     if (existente) throw Errors.ALREADY_EXISTS(`Avaliação do período ${periodo}`);
 
     return prisma.avaliacaoEstagio.create({
       data: {
-        estagioProbatorioId: estagio.id,
+        estagioProbId: estagio.id,
         periodo,
-        nota,
-        parecer,
-        avaliadorId,
+        notaGeral:     notaGeral || null,
+        resultado:     resultado || 'PENDENTE',
+        avaliadorNome: avaliadorNome || null,
         dataAvaliacao: dataAvaliacao ? new Date(dataAvaliacao) : new Date(),
-        aprovado: nota >= 6, // Nota mínima configurável
+        observacao:    observacao || null,
       },
     });
   }
 
-  async concluirEstagio(tenantId, servidorId, { resultado, portaria, observacao }) {
+  async concluirEstagio(tenantId, servidorId, { resultado, observacao }) {
     const estagio = await prisma.estagioProbatorio.findFirst({
-      where: { servidorId, tenantId, status: 'EM_ANDAMENTO' },
+      where: { servidorId, status: 'EM_CURSO', servidor: { tenantId } },
     });
     if (!estagio) throw Errors.NOT_FOUND('Estágio probatório em andamento');
 
-    await prisma.$transaction([
+    const ops = [
       prisma.estagioProbatorio.update({
         where: { id: estagio.id },
-        data: { status: resultado, dataFimReal: new Date(), portaria, observacao },
+        data:  { status: resultado, observacao },
       }),
-      // Se reprovado, exonera o servidor
-      ...(resultado === 'REPROVADO' ? [
-        prisma.servidor.update({
-          where: { id: servidorId },
-          data: { situacaoFuncional: 'EXONERADO', motivoExoneracao: 'Reprovado no estágio probatório.' },
-        }),
-      ] : []),
-    ]);
+    ];
 
+    if (resultado === 'REPROVADO') {
+      const vinculo = await prisma.vinculoFuncional.findFirst({
+        where: { servidorId, atual: true },
+      });
+      if (vinculo) {
+        ops.push(
+          prisma.vinculoFuncional.update({
+            where: { id: vinculo.id },
+            data:  {
+              situacaoFuncional: 'EXONERADO',
+              motivoEncerramento: 'Reprovado no estágio probatório.',
+              dataEncerramento:   new Date(),
+              tipoAlteracao:      'EXONERACAO',
+              atual:              false,
+            },
+          })
+        );
+      }
+    }
+
+    await prisma.$transaction(ops);
     return prisma.estagioProbatorio.findUnique({ where: { id: estagio.id } });
   }
 }

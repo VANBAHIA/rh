@@ -2,19 +2,16 @@ const prisma = require('../../config/prisma');
 const { Errors } = require('../../shared/errors/AppError');
 const { mesesEntreatas, anosDeServico } = require('../../shared/utils/date');
 
-// Mapeamento de nível por escolaridade (Magistério — Art.31)
 const NIVEL_POR_ESCOLARIDADE = {
-  MEDIO:        'I',
-  SUPERIOR:     'II',
-  POS_LATO:     'III',
-  MESTRADO:     'IV',
-  DOUTORADO:    'V',
+  MEDIO:     'I',
+  SUPERIOR:  'II',
+  POS_LATO:  'III',
+  MESTRADO:  'IV',
+  DOUTORADO: 'V',
 };
 
-// Próximo nível na carreira do magistério
 const PROXIMO_NIVEL = { I: 'II', II: 'III', III: 'IV', IV: 'V', V: null };
 
-// Próxima classe para Nível I: A→B→C | Níveis II-V: A→B→C→D→E
 const PROXIMA_CLASSE = {
   I:   { A: 'B', B: 'C', C: null },
   II:  { A: 'B', B: 'C', C: 'D', D: 'E', E: null },
@@ -25,21 +22,29 @@ const PROXIMA_CLASSE = {
 
 class ProgressaoService {
 
-  // ── Consultas ──────────────────────────────────────────────
-
   async aptos(tenantId, query = {}, skip = 0, take = 20) {
-    // Busca servidores que atingiram o interstício na classe atual
-    const where = { tenantId, situacaoFuncional: 'ATIVO' };
-    if (query.lotacaoId) where.lotacaoId = query.lotacaoId;
-    if (query.cargoId)   where.cargoId   = query.cargoId;
+    const vinculoFilter = {
+      some: {
+        atual: true,
+        situacaoFuncional: 'ATIVO',
+        ...(query.lotacaoId && { lotacaoId: query.lotacaoId }),
+        ...(query.cargoId   && { cargoId:   query.cargoId }),
+      },
+    };
 
     const servidores = await prisma.servidor.findMany({
-      where,
+      where: { tenantId, vinculos: vinculoFilter },
       include: {
-        nivelSalarial: true,
+        vinculos: {
+          where: { atual: true },
+          take: 1,
+          include: {
+            nivelSalarial: true,
+            cargo:   { select: { nome: true, codigo: true } },
+            lotacao: { select: { nome: true, sigla: true } },
+          },
+        },
         progressoes: { orderBy: { dataCompetencia: 'desc' }, take: 1 },
-        cargo: { select: { nome: true, codigo: true } },
-        lotacao: { select: { nome: true, sigla: true } },
       },
       skip, take,
     });
@@ -48,30 +53,33 @@ class ProgressaoService {
     for (const srv of servidores) {
       const avaliacao = await this._avaliarAptidao(srv);
       if (avaliacao.apto) {
-        aptos.push({ servidor: { id: srv.id, matricula: srv.matricula, nome: srv.nome, cargo: srv.cargo, lotacao: srv.lotacao }, ...avaliacao });
+        const vinculo = srv.vinculos[0];
+        aptos.push({
+          servidor: { id: srv.id, matricula: srv.matricula, nome: srv.nome, cargo: vinculo?.cargo, lotacao: vinculo?.lotacao },
+          ...avaliacao,
+        });
       }
     }
 
-    const total = await prisma.servidor.count({ where });
+    const total = await prisma.servidor.count({ where: { tenantId, vinculos: vinculoFilter } });
     return { dados: aptos, total: aptos.length, totalServidores: total };
   }
 
-  async _avaliarAptidao(srv) {
-    const nivel  = srv.nivelSalarial?.nivel  || 'I';
-    const classe = srv.nivelSalarial?.classe || 'A';
-    const intersticio = srv.nivelSalarial?.intersticio || 24; // meses
+  _avaliarAptidao(srv) {
+    const vinculo = srv.vinculos?.[0];
+    const nivel       = vinculo?.nivelSalarial?.nivel   || 'I';
+    const classe      = vinculo?.nivelSalarial?.classe  || 'A';
+    const intersticio = vinculo?.nivelSalarial?.intersticio || 24;
 
-    // Verifica próxima classe disponível
     const proximaClasse = (PROXIMA_CLASSE[nivel] || {})[classe];
     if (!proximaClasse) {
       return { apto: false, motivo: 'Servidor já está na classe final do nível.' };
     }
 
-    // Data da última progressão ou data de admissão
     const ultimaProgressao = srv.progressoes?.[0];
     const dataRef = ultimaProgressao
       ? new Date(ultimaProgressao.dataCompetencia)
-      : new Date(srv.dataAdmissao);
+      : new Date(vinculo?.dataAdmissao || srv.createdAt);
 
     const mesesDecorridos = mesesEntreatas(dataRef);
 
@@ -82,14 +90,6 @@ class ProgressaoService {
         mesesDecorridos,
         intersticioNecessario: intersticio,
       };
-    }
-
-    // Verifica progressão pendente já registrada
-    const pendente = await prisma.progressao.findFirst({
-      where: { servidorId: srv.id, statusAprovacao: 'PENDENTE', tipo: { in: ['HORIZONTAL_ANTIGUIDADE', 'HORIZONTAL_MERITO', 'HORIZONTAL_CAPACITACAO'] } },
-    });
-    if (pendente) {
-      return { apto: false, motivo: 'Já existe progressão horizontal pendente de aprovação.' };
     }
 
     return {
@@ -105,35 +105,34 @@ class ProgressaoService {
 
   async simular(tenantId, servidorId) {
     const srv = await this._findServidor(tenantId, servidorId);
-    const aptidao = await this._avaliarAptidao(srv);
+    const vinculo = srv.vinculos[0];
+    const aptidao = this._avaliarAptidao(srv);
 
-    // Busca próximo nível salarial (classe seguinte na mesma tabela)
     const proximoNivel = aptidao.proximaClasse
       ? await prisma.nivelSalarial.findFirst({
           where: {
-            tabelaSalarialId: srv.tabelaSalarialId,
-            nivel: srv.nivelSalarial.nivel,
+            tabelaSalarialId: vinculo.tabelaSalarialId,
+            nivel:  vinculo.nivelSalarial.nivel,
             classe: aptidao.proximaClasse,
           },
         })
       : null;
 
-    // Simula também mudança de nível por titulação
-    const proximoNivelTitulacao = PROXIMO_NIVEL[srv.nivelTitulacao || srv.nivelSalarial?.nivel];
+    const proximoNivelTitulacao = PROXIMO_NIVEL[vinculo.nivelTitulacao || vinculo.nivelSalarial?.nivel];
 
     return {
       servidor: { id: srv.id, matricula: srv.matricula, nome: srv.nome },
       situacaoAtual: {
-        nivel: srv.nivelSalarial?.nivel,
-        classe: srv.nivelSalarial?.classe,
-        vencimentoBase: srv.nivelSalarial?.vencimentoBase,
-        nivelTitulacao: srv.nivelTitulacao,
+        nivel:          vinculo.nivelSalarial?.nivel,
+        classe:         vinculo.nivelSalarial?.classe,
+        vencimentoBase: vinculo.nivelSalarial?.vencimentoBase,
+        nivelTitulacao: vinculo.nivelTitulacao,
       },
       progressaoHorizontal: {
         ...aptidao,
         vencimentoApos: proximoNivel?.vencimentoBase || null,
         ganho: proximoNivel
-          ? Number(proximoNivel.vencimentoBase) - Number(srv.nivelSalarial?.vencimentoBase || 0)
+          ? Number(proximoNivel.vencimentoBase) - Number(vinculo.nivelSalarial?.vencimentoBase || 0)
           : null,
       },
       progressaoVertical: {
@@ -143,7 +142,7 @@ class ProgressaoService {
           ? `Apresentar diploma/certificado correspondente ao Nível ${proximoNivelTitulacao} para alterar o nível pessoal.`
           : 'Servidor está no nível máximo de titulação.',
       },
-      anosDeServico: anosDeServico(srv.dataAdmissao),
+      anosDeServico: anosDeServico(vinculo.dataAdmissao),
     };
   }
 
@@ -160,92 +159,75 @@ class ProgressaoService {
     });
   }
 
-  // ── Progressão Horizontal ──────────────────────────────────
-
   async processarHorizontal(tenantId, { servidorId, tipo = 'HORIZONTAL_ANTIGUIDADE', dataCompetencia, portaria, observacao, pontosCapacitacao }) {
     const srv = await this._findServidor(tenantId, servidorId);
-    const aptidao = await this._avaliarAptidao(srv);
+    const vinculo = srv.vinculos[0];
+    const aptidao = this._avaliarAptidao(srv);
 
     if (!aptidao.apto) throw Errors.PROGRESSAO_INTERSTICIO();
 
-    // Busca nível destino (próxima classe)
     const nivelDestino = await prisma.nivelSalarial.findFirst({
       where: {
-        tabelaSalarialId: srv.tabelaSalarialId,
-        nivel: srv.nivelSalarial.nivel,
+        tabelaSalarialId: vinculo.tabelaSalarialId,
+        nivel:  vinculo.nivelSalarial.nivel,
         classe: aptidao.proximaClasse,
       },
     });
     if (!nivelDestino) {
-      throw Errors.VALIDATION(`Nível ${srv.nivelSalarial.nivel} Classe ${aptidao.proximaClasse} não cadastrado na tabela salarial.`);
+      throw Errors.VALIDATION(`Nível ${vinculo.nivelSalarial.nivel} Classe ${aptidao.proximaClasse} não cadastrado na tabela salarial.`);
     }
 
-    const progressao = await prisma.progressao.create({
+    return prisma.progressao.create({
       data: {
         servidorId,
-        cargoId: srv.cargoId,
-        nivelSalarialOriId: srv.nivelSalarialId,
+        cargoId:             vinculo.cargoId,
+        nivelSalarialOriId:  vinculo.nivelSalarialId,
         nivelSalarialDestId: nivelDestino.id,
         tipo,
-        dataCompetencia: dataCompetencia ? new Date(dataCompetencia) : new Date(),
+        dataCompetencia:     dataCompetencia ? new Date(dataCompetencia) : new Date(),
         portaria,
         observacao,
-        pontosCapacitacao: pontosCapacitacao || null,
-        statusAprovacao: 'PENDENTE',
+        pontosCapacitacao:   pontosCapacitacao || null,
+        statusAprovacao:     'PENDENTE',
       },
-      include: {
-        nivelOrigem:  true,
-        nivelDestino: true,
-      },
+      include: { nivelOrigem: true, nivelDestino: true },
     });
-
-    return progressao;
   }
-
-  // ── Progressão Vertical por Titulação ─────────────────────
-  // Art. 31 §5º — Magistério: mudança automática após estágio probatório,
-  // vigora no exercício seguinte ao da apresentação do comprovante
 
   async processarVerticalTitulacao(tenantId, { servidorId, novaEscolaridade, urlComprovante, dataCompetencia, portaria, observacao }) {
     const srv = await this._findServidor(tenantId, servidorId);
+    const vinculo = srv.vinculos[0];
 
-    // Determina novo nível com base na escolaridade apresentada
     const novoNivel = NIVEL_POR_ESCOLARIDADE[novaEscolaridade];
     if (!novoNivel) throw Errors.VALIDATION('Escolaridade inválida para progressão vertical.');
 
-    const nivelAtual = srv.nivelTitulacao || srv.nivelSalarial?.nivel || 'I';
+    const nivelAtual = vinculo.nivelTitulacao || vinculo.nivelSalarial?.nivel || 'I';
     if (novoNivel <= nivelAtual) {
       throw Errors.VALIDATION(`Nível ${novoNivel} não é superior ao nível atual ${nivelAtual}.`);
     }
 
-    // Art. 31 §5º: vigora no exercício SEGUINTE
     const competencia = dataCompetencia ? new Date(dataCompetencia) : new Date();
     const exercicioVigencia = competencia.getFullYear() + 1;
 
-    // Nível destino: novo nível, classe inicial 'A'
     const nivelDestino = await prisma.nivelSalarial.findFirst({
-      where: {
-        tabelaSalarialId: srv.tabelaSalarialId,
-        nivel: novoNivel,
-        classe: 'A',
-      },
+      where: { tabelaSalarialId: vinculo.tabelaSalarialId, nivel: novoNivel, classe: 'A' },
     });
     if (!nivelDestino) {
-      throw Errors.VALIDATION(`Nível ${novoNivel} Classe A não cadastrado na tabela salarial. Cadastre-o primeiro em PCCV.`);
+      throw Errors.VALIDATION(`Nível ${novoNivel} Classe A não cadastrado na tabela salarial.`);
     }
 
     const progressao = await prisma.progressao.create({
       data: {
         servidorId,
-        cargoId: srv.cargoId,
-        nivelSalarialOriId: srv.nivelSalarialId,
+        cargoId:             vinculo.cargoId,
+        nivelSalarialOriId:  vinculo.nivelSalarialId,
         nivelSalarialDestId: nivelDestino.id,
-        tipo: 'VERTICAL_TITULACAO',
-        nivelAnterior: nivelAtual,
-        nivelNovo: novoNivel,
+        tipo:                'VERTICAL_TITULACAO',
+        nivelAnterior:       nivelAtual,
+        nivelNovo:           novoNivel,
         titulacaoApresentada: novaEscolaridade,
         urlComprovante,
-        dataCompetencia: competencia,
+        dataCompetencia:     competencia,
         exercicioVigencia,
         portaria,
         observacao: observacao || `Mudança de Nível ${nivelAtual}→${novoNivel} por nova titulação. Vigência: ${exercicioVigencia}.`,
@@ -260,14 +242,12 @@ class ProgressaoService {
     };
   }
 
-  // ── Enquadramento ──────────────────────────────────────────
-
   async processarEnquadramento(tenantId, { servidorId, tipo = 'ENQUADRAMENTO_INICIAL', nivelDestId, lei, observacao, anosServico }) {
     const srv = await this._findServidor(tenantId, servidorId);
+    const vinculo = srv.vinculos[0];
 
-    // Para ENQUADRAMENTO_TEMPO_SERVICO (Art.32 §1º — 20+ anos → Classe C)
     if (tipo === 'ENQUADRAMENTO_TEMPO_SERVICO') {
-      const anos = anosServico || anosDeServico(srv.dataAdmissao);
+      const anos = anosServico || anosDeServico(vinculo.dataAdmissao);
       if (anos < 20) {
         throw Errors.VALIDATION(`Servidor possui ${anos} anos de serviço. São necessários 20 anos para este enquadramento.`);
       }
@@ -276,30 +256,26 @@ class ProgressaoService {
     if (!nivelDestId) throw Errors.VALIDATION('ID do nível salarial destino é obrigatório.');
 
     const nivelDestino = await prisma.nivelSalarial.findFirst({
-      where: { id: nivelDestId, tabelaSalarialId: srv.tabelaSalarialId },
+      where: { id: nivelDestId, tabelaSalarialId: vinculo.tabelaSalarialId },
     });
     if (!nivelDestino) throw Errors.NOT_FOUND('Nível Salarial destino');
 
-    const progressao = await prisma.progressao.create({
+    return prisma.progressao.create({
       data: {
         servidorId,
-        cargoId: srv.cargoId,
-        nivelSalarialOriId: srv.nivelSalarialId,
+        cargoId:             vinculo.cargoId,
+        nivelSalarialOriId:  vinculo.nivelSalarialId,
         nivelSalarialDestId: nivelDestId,
         tipo,
-        dataCompetencia: new Date(),
+        dataCompetencia:     new Date(),
         lei,
         observacao,
-        anosServico: anosServico || anosDeServico(srv.dataAdmissao),
-        statusAprovacao: 'PENDENTE',
+        anosServico:         anosServico || anosDeServico(vinculo.dataAdmissao),
+        statusAprovacao:     'PENDENTE',
       },
       include: { nivelOrigem: true, nivelDestino: true },
     });
-
-    return progressao;
   }
-
-  // ── Aprovação / Rejeição ───────────────────────────────────
 
   async aprovar(tenantId, id, userId, { portaria, observacao }) {
     const prog = await this._findProgressao(tenantId, id);
@@ -307,52 +283,37 @@ class ProgressaoService {
       throw Errors.VALIDATION('Apenas progressões pendentes podem ser aprovadas.');
     }
 
-    // Define data de efetivação conforme o tipo
     let dataEfetivacao = new Date();
     if (prog.tipo === 'VERTICAL_TITULACAO' && prog.exercicioVigencia) {
-      // Art. 31 §5º: vigora no exercício seguinte
-      dataEfetivacao = new Date(prog.exercicioVigencia, 0, 1); // 01/01/exercícioVigencia
+      dataEfetivacao = new Date(prog.exercicioVigencia, 0, 1);
+    }
+
+    const vinculo = await prisma.vinculoFuncional.findFirst({
+      where: { servidorId: prog.servidorId, atual: true },
+    });
+    if (!vinculo) throw Errors.NOT_FOUND('Vínculo funcional ativo');
+
+    const updateVinculo = { nivelSalarialId: prog.nivelSalarialDestId };
+    if (prog.tipo === 'VERTICAL_TITULACAO') {
+      updateVinculo.nivelTitulacao = prog.nivelNovo;
+      updateVinculo.titulacaoComprovada = prog.titulacaoApresentada;
     }
 
     await prisma.$transaction([
-      // Atualiza a progressão
       prisma.progressao.update({
         where: { id },
         data: {
           statusAprovacao: 'APROVADO',
-          aprovadoPor: userId,
-          aprovadoEm: new Date(),
-          portaria: portaria || prog.portaria,
+          aprovadoPor:     userId,
+          aprovadoEm:      new Date(),
+          portaria:        portaria || prog.portaria,
           dataEfetivacao,
-          observacao: observacao || prog.observacao,
+          observacao:      observacao || prog.observacao,
         },
       }),
-
-      // Atualiza o servidor: nível salarial + nível de titulação (se vertical)
-      prisma.servidor.update({
-        where: { id: prog.servidorId },
-        data: {
-          nivelSalarialId: prog.nivelSalarialDestId,
-          ...(prog.tipo === 'VERTICAL_TITULACAO' ? {
-            nivelTitulacao: prog.nivelNovo,
-            titulacaoComprovada: prog.titulacaoApresentada,
-            dataTitulacao: new Date(),
-          } : {}),
-        },
-      }),
-
-      // Registra no histórico funcional
-      prisma.historicoFuncional.create({
-        data: {
-          servidorId: prog.servidorId,
-          tenantId,
-          dataAlteracao: dataEfetivacao,
-          tipoAlteracao: 'PROGRESSAO',
-          descricao: `Progressão ${prog.tipo} aprovada. ${prog.nivelOrigem?.nivel}${prog.nivelOrigem?.classe} → ${prog.nivelDestino?.nivel}${prog.nivelDestino?.classe}`,
-          nivelSalarialAnteriorId: prog.nivelSalarialOriId,
-          nivelSalarialNovoId: prog.nivelSalarialDestId,
-          observacao: portaria ? `Portaria: ${portaria}` : null,
-        },
+      prisma.vinculoFuncional.update({
+        where: { id: vinculo.id },
+        data:  updateVinculo,
       }),
     ]);
 
@@ -372,24 +333,31 @@ class ProgressaoService {
       where: { id },
       data: {
         statusAprovacao: 'REJEITADO',
-        aprovadoPor: userId,
-        aprovadoEm: new Date(),
-        observacao: motivo,
+        aprovadoPor:     userId,
+        aprovadoEm:      new Date(),
+        observacao:      motivo,
       },
     });
   }
 
-  // ── Processamento em Lote ──────────────────────────────────
-
   async processarLote(tenantId, { tipo = 'HORIZONTAL_ANTIGUIDADE', portaria, lotacaoId, cargoId }) {
-    const where = { tenantId, situacaoFuncional: 'ATIVO' };
-    if (lotacaoId) where.lotacaoId = lotacaoId;
-    if (cargoId)   where.cargoId   = cargoId;
+    const vinculoFilter = {
+      some: {
+        atual: true,
+        situacaoFuncional: 'ATIVO',
+        ...(lotacaoId && { lotacaoId }),
+        ...(cargoId   && { cargoId }),
+      },
+    };
 
     const servidores = await prisma.servidor.findMany({
-      where,
+      where: { tenantId, vinculos: vinculoFilter },
       include: {
-        nivelSalarial: true,
+        vinculos: {
+          where: { atual: true },
+          take: 1,
+          include: { nivelSalarial: true },
+        },
         progressoes: { orderBy: { dataCompetencia: 'desc' }, take: 1 },
       },
     });
@@ -398,7 +366,7 @@ class ProgressaoService {
 
     for (const srv of servidores) {
       try {
-        const aptidao = await this._avaliarAptidao(srv);
+        const aptidao = this._avaliarAptidao(srv);
         if (!aptidao.apto) { resultados.ignorados++; continue; }
 
         await this.processarHorizontal(tenantId, {
@@ -420,17 +388,20 @@ class ProgressaoService {
     };
   }
 
-  // ── Helpers ────────────────────────────────────────────────
-
   async _findServidor(tenantId, servidorId) {
     const srv = await prisma.servidor.findFirst({
       where: { id: servidorId, tenantId },
       include: {
-        nivelSalarial: true,
+        vinculos: {
+          where: { atual: true },
+          take: 1,
+          include: { nivelSalarial: true },
+        },
         progressoes: { orderBy: { dataCompetencia: 'desc' }, take: 1 },
       },
     });
     if (!srv) throw Errors.NOT_FOUND('Servidor');
+    if (!srv.vinculos[0]) throw Errors.NOT_FOUND('Vínculo funcional ativo');
     return srv;
   }
 

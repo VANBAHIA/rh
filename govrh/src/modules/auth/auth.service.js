@@ -14,7 +14,12 @@ class AuthService {
    * O tenantCnpj resolve o tenant em contexto multitenancy
    */
   async login({ email, tenantCnpj, senha, mfaCode }) {
-    // 1. Resolve o tenant pelo CNPJ
+    // 1. Valida se os campos obrigatórios foram fornecidos
+    if (!tenantCnpj) throw Errors.VALIDATION('CNPJ do órgão é obrigatório.');
+    if (!email) throw Errors.VALIDATION('E-mail é obrigatório.');
+    if (!senha) throw Errors.VALIDATION('Senha é obrigatória.');
+
+    // 2. Resolve o tenant pelo CNPJ
     const tenant = await prisma.tenant.findUnique({ where: { cnpj: tenantCnpj } });
     if (!tenant) throw Errors.INVALID_CREDENTIALS();
     if (!tenant.ativo) throw Errors.TENANT_INACTIVE();

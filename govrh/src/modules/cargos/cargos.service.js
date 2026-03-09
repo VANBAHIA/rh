@@ -67,7 +67,7 @@ class CargosService {
         orderBy: [{ grupoOcupacional: { nome: 'asc' } }, { nome: 'asc' }],
         include: {
           grupoOcupacional: { select: { nome: true, codigo: true } },
-          _count: { select: { servidores: true } },
+         
         },
       }),
       prisma.cargo.count({ where }),
@@ -99,7 +99,7 @@ class CargosService {
       where: { id, tenantId },
       include: {
         grupoOcupacional: true,
-        _count: { select: { servidores: true } },
+       
       },
     });
     if (!cargo) throw Errors.NOT_FOUND('Cargo');
@@ -162,12 +162,10 @@ class CargosService {
     return prisma.tabelaSalarial.findMany({
       where,
       orderBy: { vigenciaIni: 'desc' },
-      include: { _count: { select: { niveis: true, servidores: true } } },
     });
   }
 
   async criarTabela(tenantId, dados) {
-    // Desativa outras tabelas ativas se esta for marcada como ativa
     if (dados.ativa !== false) {
       await prisma.tabelaSalarial.updateMany({
         where: { tenantId, ativa: true },
@@ -176,7 +174,12 @@ class CargosService {
     }
 
     return prisma.tabelaSalarial.create({
-      data: { ...dados, tenantId, ativa: dados.ativa !== false },
+      data: {
+        ...dados,
+        tenantId,
+        ativa: dados.ativa !== false,
+        vigenciaIni: dados.vigenciaIni ? new Date(dados.vigenciaIni) : new Date(),
+      },
     });
   }
 
@@ -185,7 +188,7 @@ class CargosService {
       where: { id, tenantId },
       include: {
         niveis: { orderBy: [{ nivel: 'asc' }, { classe: 'asc' }] },
-        _count: { select: { servidores: true } },
+       
       },
     });
     if (!tabela) throw Errors.NOT_FOUND('Tabela Salarial');
@@ -194,7 +197,9 @@ class CargosService {
 
   async atualizarTabela(tenantId, id, dados) {
     await this.buscarTabela(tenantId, id);
-    return prisma.tabelaSalarial.update({ where: { id }, data: dados });
+    const data = { ...dados };
+    if (data.vigenciaIni) data.vigenciaIni = new Date(data.vigenciaIni);
+    return prisma.tabelaSalarial.update({ where: { id }, data });
   }
 
   // ── Níveis Salariais ───────────────────────────────────────
@@ -233,9 +238,9 @@ class CargosService {
     const nivel = await prisma.nivelSalarial.findFirst({ where: { id, tabelaSalarialId: tabelaId } });
     if (!nivel) throw Errors.NOT_FOUND('Nível Salarial');
 
-    // Verifica se há servidores neste nível
-    const emUso = await prisma.servidor.count({ where: { nivelSalarialId: id } });
-    if (emUso > 0) throw Errors.VALIDATION(`Nível em uso por ${emUso} servidor(es). Remaneje-os primeiro.`);
+    // Verifica se há vínculos funcionais usando este nível
+    const emUso = await prisma.vinculoFuncional.count({ where: { nivelSalarialId: id } });
+    if (emUso > 0) throw Errors.VALIDATION(`Nível em uso por ${emUso} vínculo(s) funcional(is). Remaneje-os primeiro.`);
 
     await prisma.nivelSalarial.delete({ where: { id } });
   }
@@ -278,6 +283,67 @@ class CargosService {
 
   // ── Lotações ───────────────────────────────────────────────
 
+  // ── Níveis Comissionados (tabela de símbolos CC) ───────────
+
+  async listarNiveisComissionados(tenantId, query = {}) {
+    const where = { tenantId };
+    if (query.ativo !== undefined) where.ativo = query.ativo !== 'false';
+    return prisma.nivelComissionado.findMany({
+      where,
+      orderBy: [{ simbolo: 'asc' }, { vigenciaIni: 'desc' }],
+    });
+  }
+
+  async criarNivelComissionado(tenantId, dados) {
+    return prisma.nivelComissionado.create({
+      data: { ...dados, tenantId, vigenciaIni: new Date(dados.vigenciaIni) },
+    });
+  }
+
+  async atualizarNivelComissionado(tenantId, id, dados) {
+    const item = await prisma.nivelComissionado.findFirst({ where: { id, tenantId } });
+    if (!item) throw require('../../shared/errors/AppError').Errors.NOT_FOUND('Nível Comissionado');
+    return prisma.nivelComissionado.update({ where: { id }, data: dados });
+  }
+
+  async desativarNivelComissionado(tenantId, id) {
+    const item = await prisma.nivelComissionado.findFirst({ where: { id, tenantId } });
+    if (!item) throw require('../../shared/errors/AppError').Errors.NOT_FOUND('Nível Comissionado');
+    const emUso = await prisma.vinculoFuncional.count({ where: { nivelComissionadoId: id, atual: true } });
+    if (emUso > 0) throw require('../../shared/errors/AppError').Errors.VALIDATION(`Nível em uso por ${emUso} vínculo(s) ativo(s).`);
+    await prisma.nivelComissionado.update({ where: { id }, data: { ativo: false } });
+  }
+
+  // ── Gratificações de Função (GF) ───────────────────────────
+
+  async listarGratificacoes(tenantId, query = {}) {
+    const where = { tenantId };
+    if (query.ativo !== undefined) where.ativo = query.ativo !== 'false';
+    return prisma.gratificacaoFuncao.findMany({
+      where,
+      orderBy: [{ simbolo: 'asc' }, { vigenciaIni: 'desc' }],
+    });
+  }
+
+  async criarGratificacao(tenantId, dados) {
+    return prisma.gratificacaoFuncao.create({
+      data: { ...dados, tenantId, vigenciaIni: new Date(dados.vigenciaIni) },
+    });
+  }
+
+  async atualizarGratificacao(tenantId, id, dados) {
+    const item = await prisma.gratificacaoFuncao.findFirst({ where: { id, tenantId } });
+    if (!item) throw require('../../shared/errors/AppError').Errors.NOT_FOUND('Gratificação de Função');
+    return prisma.gratificacaoFuncao.update({ where: { id }, data: dados });
+  }
+
+  async desativarGratificacao(tenantId, id) {
+    const item = await prisma.gratificacaoFuncao.findFirst({ where: { id, tenantId } });
+    if (!item) throw require('../../shared/errors/AppError').Errors.NOT_FOUND('Gratificação de Função');
+    const emUso = await prisma.vinculoFuncional.count({ where: { gratificacaoFuncaoId: id, atual: true } });
+    if (emUso > 0) throw require('../../shared/errors/AppError').Errors.VALIDATION(`GF em uso por ${emUso} vínculo(s) ativo(s).`);
+    await prisma.gratificacaoFuncao.update({ where: { id }, data: { ativo: false } });
+  }
   async listarLotacoes(tenantId, query = {}) {
     const where = { tenantId };
     if (query.ativo !== undefined) where.ativo = query.ativo !== 'false';
@@ -295,7 +361,7 @@ class CargosService {
       orderBy: [{ nivel: 'asc' }, { nome: 'asc' }],
       include: {
         lotacaoPai: { select: { nome: true, sigla: true } },
-        _count: { select: { servidores: true, sublotacoes: true } },
+       
       },
     });
   }

@@ -1,16 +1,40 @@
 const { Router } = require('express')
 const multer = require('multer')
+const { identify, cadastrar, remover } = require('./facial.controller')
 const { authenticate, authorize } = require('../../middlewares/authenticate')
-const ctrl = require('./facial.controller')
+const { auditLog } = require('../../middlewares/auditLogger')
 
 const router = Router()
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } })
+const upload = multer()
 
-// ── Pública (usada pelo BaterPontoPage) ──────────────────────
-router.post('/identify', upload.single('frame'), ctrl.identify)
+// ─────────────────────────────────────────────────────────────────────────────
+// ROTA PÚBLICA — identificação facial pelo BaterPontoPage
+// Não requer autenticação JWT, apenas x-tenant-id no header
+// ─────────────────────────────────────────────────────────────────────────────
+router.post(
+  '/identify',
+  upload.single('frame'),
+  identify
+)
 
-// ── Protegidas (usadas pela tela de cadastro do RH) ──────────
-router.post('/cadastrar/:servidorId', authenticate, authorize('servidores', 'update'), upload.single('foto'), ctrl.cadastrar)
-router.delete('/cadastrar/:servidorId', authenticate, authorize('servidores', 'update'), ctrl.remover)
+// ─────────────────────────────────────────────────────────────────────────────
+// ROTAS PROTEGIDAS — cadastro e remoção de biometria
+// ─────────────────────────────────────────────────────────────────────────────
+router.post(
+  '/cadastrar/:servidorId',
+  authenticate,
+  authorize('servidores', 'update'),
+  auditLog('facial', 'biometria_create'),
+  upload.single('foto'),
+  cadastrar
+)
+
+router.delete(
+  '/cadastrar/:servidorId',
+  authenticate,
+  authorize('servidores', 'delete'),
+  auditLog('facial', 'biometria_delete'),
+  remover
+)
 
 module.exports = router

@@ -2,6 +2,19 @@ const prisma = require('../../config/prisma');
 const { Errors } = require('../../shared/errors/AppError');
 const { mesesEntreatas } = require('../../shared/utils/date');
 
+const servidorSelectBasico = {
+  matricula: true,
+  nome: true,
+  vinculos: {
+    where: { atual: true },
+    take: 1,
+    select: {
+      cargo: { select: { nome: true } },
+      lotacao: { select: { nome: true, sigla: true } },
+    },
+  },
+};
+
 class FeriasService {
 
   async periodos(tenantId, servidorId) {
@@ -34,11 +47,9 @@ class FeriasService {
     const fim    = new Date(dataFim);
     const diasGozo = Math.ceil((fim - inicio) / 86400000) + 1;
 
-    // Valida saldo
     if (diasGozo + diasAbono > periodo.saldoDias) {
       throw Errors.FERIAS_INSUFICIENTE();
     }
-    // Máximo 1/3 em abono
     if (diasAbono > Math.floor(periodo.diasDireito / 3)) {
       throw Errors.VALIDATION('Abono pecuniário não pode exceder 1/3 dos dias de direito.');
     }
@@ -47,7 +58,6 @@ class FeriasService {
       data: { servidorId, periodoAquisitivoId, dataInicio: inicio, dataFim: fim, diasGozo, diasAbono, status: 'PENDENTE' },
     });
 
-    // Cria solicitação de aprovação
     await prisma.solicitacaoAprovacao.create({
       data: {
         tenantId,
@@ -67,7 +77,7 @@ class FeriasService {
     const ferias = await prisma.ferias.findFirst({
       where: { id, servidor: { tenantId } },
       include: {
-        servidor: { select: { matricula: true, nome: true, cargo: { select: { nome: true } } } },
+        servidor: { select: servidorSelectBasico },
         periodoAquisitivo: true,
         solicitacao: true,
       },
@@ -80,7 +90,6 @@ class FeriasService {
     const ferias = await this.buscar(tenantId, id);
     if (ferias.status !== 'PENDENTE') throw Errors.VALIDATION('Apenas férias pendentes podem ser aprovadas.');
 
-    // Atualiza férias e período aquisitivo em transação
     const [feriasAtual] = await prisma.$transaction([
       prisma.ferias.update({
         where: { id },
@@ -106,7 +115,6 @@ class FeriasService {
   async cancelar(tenantId, id, { motivo }) {
     const ferias = await this.buscar(tenantId, id);
     if (ferias.status === 'APROVADO') {
-      // Estorna o saldo se já havia sido debitado
       await prisma.periodoAquisitivo.update({
         where: { id: ferias.periodoAquisitivoId },
         data: {
@@ -123,23 +131,39 @@ class FeriasService {
   }
 
   async vencendo(tenantId, query = {}, skip = 0, take = 20) {
-    // Períodos aquisitivos com saldo > 0 que vencem nos próximos 90 dias
     const limite = new Date();
     limite.setDate(limite.getDate() + (parseInt(query.dias) || 90));
 
+    const vinculoFilter = {
+      some: {
+        atual: true,
+        situacaoFuncional: 'ATIVO',
+        ...(query.lotacaoId && { lotacaoId: query.lotacaoId }),
+      },
+    };
+
     const where = {
-      servidor: { tenantId, situacaoFuncional: 'ATIVO' },
+      servidor: { tenantId, vinculos: vinculoFilter },
       saldoDias: { gt: 0 },
       dataFim: { lte: limite },
     };
-    if (query.lotacaoId) where.servidor = { ...where.servidor, lotacaoId: query.lotacaoId };
 
     const [dados, total] = await prisma.$transaction([
       prisma.periodoAquisitivo.findMany({
         where, skip, take,
         orderBy: { dataFim: 'asc' },
         include: {
-          servidor: { select: { matricula: true, nome: true, lotacao: { select: { nome: true } } } },
+          servidor: {
+            select: {
+              matricula: true,
+              nome: true,
+              vinculos: {
+                where: { atual: true },
+                take: 1,
+                select: { lotacao: { select: { nome: true, sigla: true } } },
+              },
+            },
+          },
         },
       }),
       prisma.periodoAquisitivo.count({ where }),
@@ -149,7 +173,6 @@ class FeriasService {
   }
 
   async programacao(tenantId, mes) {
-    // Férias agendadas/aprovadas que ocorrem no mês informado
     const [ano, mesNum] = mes.split('-').map(Number);
     const dataInicio = new Date(ano, mesNum - 1, 1);
     const dataFim    = new Date(ano, mesNum, 0);
@@ -165,7 +188,7 @@ class FeriasService {
         ],
       },
       include: {
-        servidor: { select: { matricula: true, nome: true, cargo: { select: { nome: true } }, lotacao: { select: { nome: true, sigla: true } } } },
+        servidor: { select: servidorSelectBasico },
       },
       orderBy: { dataInicio: 'asc' },
     });

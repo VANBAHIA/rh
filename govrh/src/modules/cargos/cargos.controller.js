@@ -178,6 +178,41 @@ class CargosController {
       paginate(res, servidores, total, page, limit);
     } catch (err) { next(err); }
   }
+  // ── Níveis Comissionados ─────────────────────────────────
+  async listarNiveisComissionados(req, res, next) {
+    try { ok(res, await this.service.listarNiveisComissionados(req.tenantId, req.query)); }
+    catch (err) { next(err); }
+  }
+  async criarNivelComissionado(req, res, next) {
+    try { created(res, await this.service.criarNivelComissionado(req.tenantId, req.body)); }
+    catch (err) { next(err); }
+  }
+  async atualizarNivelComissionado(req, res, next) {
+    try { ok(res, await this.service.atualizarNivelComissionado(req.tenantId, req.params.id, req.body)); }
+    catch (err) { next(err); }
+  }
+  async desativarNivelComissionado(req, res, next) {
+    try { await this.service.desativarNivelComissionado(req.tenantId, req.params.id); noContent(res); }
+    catch (err) { next(err); }
+  }
+
+  // ── Gratificações de Função ──────────────────────────────
+  async listarGratificacoes(req, res, next) {
+    try { ok(res, await this.service.listarGratificacoes(req.tenantId, req.query)); }
+    catch (err) { next(err); }
+  }
+  async criarGratificacao(req, res, next) {
+    try { created(res, await this.service.criarGratificacao(req.tenantId, req.body)); }
+    catch (err) { next(err); }
+  }
+  async atualizarGratificacao(req, res, next) {
+    try { ok(res, await this.service.atualizarGratificacao(req.tenantId, req.params.id, req.body)); }
+    catch (err) { next(err); }
+  }
+  async desativarGratificacao(req, res, next) {
+    try { await this.service.desativarGratificacao(req.tenantId, req.params.id); noContent(res); }
+    catch (err) { next(err); }
+  }
 }
 
 module.exports = CargosController;

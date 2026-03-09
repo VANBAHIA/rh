@@ -3,9 +3,15 @@
 
 const { getPagination } = require('../../utils/pagination');
 
+const vinculoAtualInclude = {
+  cargo: { include: { grupoOcupacional: true } },
+  tabelaSalarial: true,
+  nivelSalarial: true,
+  lotacao: { include: { lotacaoPai: true } },
+};
+
 class ServidoresRepository {
   constructor(db) {
-    // db é o Prisma client com tenant scope já aplicado
     this.db = db;
   }
 
@@ -21,12 +27,23 @@ class ServidoresRepository {
         take,
         orderBy: { nome: 'asc' },
         select: {
-          id: true, matricula: true, nome: true, cpf: true,
-          regimeJuridico: true, situacaoFuncional: true,
-          dataAdmissao: true, fotoUrl: true,
-          cargo: { select: { id: true, nome: true, codigo: true } },
-          lotacao: { select: { id: true, nome: true, sigla: true } },
-          nivelSalarial: { select: { nivel: true, classe: true, vencimentoBase: true } },
+          id: true,
+          matricula: true,
+          nome: true,
+          cpf: true,
+          fotoUrl: true,
+          vinculos: {
+            where: { atual: true },
+            take: 1,
+            select: {
+              regimeJuridico: true,
+              situacaoFuncional: true,
+              dataAdmissao: true,
+              cargo: { select: { id: true, nome: true, codigo: true } },
+              lotacao: { select: { id: true, nome: true, sigla: true } },
+              nivelSalarial: { select: { nivel: true, classe: true, vencimentoBase: true } },
+            },
+          },
         },
       }),
       this.db.servidor.count({ where }),
@@ -39,10 +56,11 @@ class ServidoresRepository {
     return this.db.servidor.findUnique({
       where: { id },
       include: {
-        cargo: { include: { grupoOcupacional: true } },
-        tabelaSalarial: true,
-        nivelSalarial: true,
-        lotacao: { include: { lotacaoPai: true } },
+        vinculos: {
+          where: { atual: true },
+          take: 1,
+          include: vinculoAtualInclude,
+        },
         dadosBancarios: true,
         dependentes: { where: { ativo: true } },
         documentos: { where: { ativo: true }, orderBy: { createdAt: 'desc' } },
@@ -59,12 +77,46 @@ class ServidoresRepository {
     return this.db.servidor.findFirst({ where: { matricula } });
   }
 
-  async create(data) {
-    return this.db.servidor.create({ data, include: { cargo: true, lotacao: true, nivelSalarial: true } });
+  async create(dadosServidor) {
+    return this.db.servidor.create({
+      data: dadosServidor,
+      include: {
+        vinculos: {
+          where: { atual: true },
+          take: 1,
+          include: vinculoAtualInclude,
+        },
+      },
+    });
+  }
+
+  async createVinculo(data) {
+    return this.db.vinculoFuncional.create({ data, include: vinculoAtualInclude });
+  }
+
+  async updateVinculo(id, data) {
+    return this.db.vinculoFuncional.update({ where: { id }, data });
+  }
+
+  async findVinculoAtual(servidorId) {
+    return this.db.vinculoFuncional.findFirst({
+      where: { servidorId, atual: true },
+      include: vinculoAtualInclude,
+    });
   }
 
   async update(id, data) {
-    return this.db.servidor.update({ where: { id }, data, include: { cargo: true, lotacao: true, nivelSalarial: true } });
+    return this.db.servidor.update({
+      where: { id },
+      data,
+      include: {
+        vinculos: {
+          where: { atual: true },
+          take: 1,
+          include: vinculoAtualInclude,
+        },
+      },
+    });
   }
 
   async delete(id) {
@@ -72,14 +124,15 @@ class ServidoresRepository {
   }
 
   async findHistorico(servidorId) {
-    return this.db.historicoFuncional.findMany({
+    return this.db.vinculoFuncional.findMany({
       where: { servidorId },
-      orderBy: { dataAlteracao: 'desc' },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        cargo: { select: { nome: true, codigo: true } },
+        lotacao: { select: { nome: true, sigla: true } },
+        nivelSalarial: { select: { nivel: true, classe: true, vencimentoBase: true } },
+      },
     });
-  }
-
-  async createHistorico(data) {
-    return this.db.historicoFuncional.create({ data });
   }
 
   async findProgressoes(servidorId) {
@@ -98,6 +151,10 @@ class ServidoresRepository {
     return this.db.progressao.create({ data });
   }
 
+  async updateProgressao(id, data) {
+    return this.db.progressao.update({ where: { id }, data });
+  }
+
   async findDocumentos(servidorId) {
     return this.db.documentoServidor.findMany({
       where: { servidorId, ativo: true },
@@ -105,8 +162,7 @@ class ServidoresRepository {
     });
   }
 
-  async gerarMatricula(tenantId) {
-    // Gera matrícula sequencial por tenant: prefixo ano + sequencial 6 dígitos
+  async gerarMatricula() {
     const ano = new Date().getFullYear().toString().slice(2);
     const ultimo = await this.db.servidor.findFirst({
       orderBy: { matricula: 'desc' },
@@ -123,12 +179,57 @@ class ServidoresRepository {
     if (filtros.nome) where.nome = { contains: filtros.nome };
     if (filtros.cpf) where.cpf = { contains: filtros.cpf.replace(/\D/g, '') };
     if (filtros.matricula) where.matricula = { contains: filtros.matricula };
-    if (filtros.situacao) where.situacaoFuncional = filtros.situacao;
-    if (filtros.regime) where.regimeJuridico = filtros.regime;
-    if (filtros.lotacaoId) where.lotacaoId = filtros.lotacaoId;
-    if (filtros.cargoId) where.cargoId = filtros.cargoId;
+
+    if (filtros.situacao || filtros.regime || filtros.lotacaoId || filtros.cargoId) {
+      where.vinculos = {
+        some: {
+          atual: true,
+          ...(filtros.situacao && { situacaoFuncional: filtros.situacao }),
+          ...(filtros.regime && { regimeJuridico: filtros.regime }),
+          ...(filtros.lotacaoId && { lotacaoId: filtros.lotacaoId }),
+          ...(filtros.cargoId && { cargoId: filtros.cargoId }),
+        },
+      };
+    }
+
     return where;
   }
+
+  // Lista todas as contas
+  async findDadosBancarios(servidorId) {
+    return this.db.dadosBancarios.findMany({
+      where: { servidorId },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  // Cria nova conta — desativa as anteriores em transaction
+  async createDadosBancarios(servidorId, data) {
+    return this.db.$transaction([
+      this.db.dadosBancarios.updateMany({
+        where: { servidorId, ativa: true },
+        data: { ativa: false },
+      }),
+      this.db.dadosBancarios.create({
+        data: { servidorId, ...data, ativa: true },
+      }),
+    ]);
+  }
+
+  // Ativa uma conta específica — desativa as demais
+  async ativarConta(servidorId, contaId) {
+    return this.db.$transaction([
+      this.db.dadosBancarios.updateMany({
+        where: { servidorId, ativa: true },
+        data: { ativa: false },
+      }),
+      this.db.dadosBancarios.update({
+        where: { id: contaId },
+        data: { ativa: true },
+      }),
+    ]);
+  }
+
 }
 
 module.exports = ServidoresRepository;

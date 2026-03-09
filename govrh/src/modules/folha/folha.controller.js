@@ -22,6 +22,11 @@ class FolhaController {
     try { ok(res, await this.service.atualizarVerba(req.tenantId, req.params.id, req.body)); }
     catch (err) { next(err); }
   }
+  async desativarVerba(req, res, next) {
+    try { ok(res, await this.service.desativarVerba(req.tenantId, req.params.id)); }
+    catch (err) { next(err); }
+  }
+
   async getConfig(req, res, next) {
     try { ok(res, await this.service.getConfig(req.tenantId)); }
     catch (err) { next(err); }
@@ -30,6 +35,7 @@ class FolhaController {
     try { ok(res, await this.service.salvarConfig(req.tenantId, req.body)); }
     catch (err) { next(err); }
   }
+
   async listarConsignados(req, res, next) {
     try { ok(res, await this.service.listarConsignados(req.tenantId, req.params.servidorId)); }
     catch (err) { next(err); }
@@ -46,6 +52,7 @@ class FolhaController {
     try { await this.service.cancelarConsignado(req.tenantId, req.params.id); noContent(res); }
     catch (err) { next(err); }
   }
+
   async listarFolhas(req, res, next) {
     try {
       const { skip, take, page, limit } = parsePagination(req.query);
@@ -61,10 +68,34 @@ class FolhaController {
     try { ok(res, await this.service.buscarFolha(req.tenantId, req.params.competencia, req.params.tipo)); }
     catch (err) { next(err); }
   }
+
+  async excluir(req, res, next) {
+    try { await this.service.excluir(req.tenantId, req.params.competencia, req.params.tipo); noContent(res); }
+    catch (err) { next(err); }
+  }
+
+  async reprocessarServidor(req, res, next) {
+    try {
+      ok(res, await this.service.reprocessarServidor(
+        req.tenantId,
+        req.params.competencia,
+        req.params.tipo,
+        req.params.servidorId
+      ));
+    } catch (err) { next(err); }
+  }
+
   async listarItens(req, res, next) {
     try {
       const { skip, take, page, limit } = parsePagination(req.query);
       const { itens, total } = await this.service.listarItens(req.tenantId, req.params.competencia, req.params.tipo, req.query, skip, take);
+      paginate(res, itens, total, page, limit);
+    } catch (err) { next(err); }
+  }
+  async listarItensPorId(req, res, next) {
+    try {
+      const { skip, take, page, limit } = parsePagination(req.query);
+      const { itens, total } = await this.service.listarItensPorId(req.tenantId, req.params.folhaId, req.query, skip, take);
       paginate(res, itens, total, page, limit);
     } catch (err) { next(err); }
   }
@@ -76,8 +107,20 @@ class FolhaController {
     try { ok(res, await this.service.reabrir(req.tenantId, req.params.competencia, req.params.tipo)); }
     catch (err) { next(err); }
   }
+  async excluir(req, res, next) {
+    try { ok(res, await this.service.excluir(req.tenantId, req.params.competencia, req.params.tipo)); }
+    catch (err) { next(err); }
+  }
   async holerite(req, res, next) {
-    try { ok(res, await this.service.holerite(req.tenantId, req.params.servidorId, req.params.competencia)); }
+    try { ok(res, await this.service.holerite(req.tenantId, req.params.servidorId, req.params.competencia, req.query.tipo)); }
+    catch (err) { next(err); }
+  }
+  async relatorioAnalitico(req, res, next) {
+    try { ok(res, await this.service.relatorioAnalitico(req.tenantId, req.params.competencia, req.params.tipo)); }
+    catch (err) { next(err); }
+  }
+  async relatorioSintetico(req, res, next) {
+    try { ok(res, await this.service.relatorioSintetico(req.tenantId, req.params.competencia, req.params.tipo)); }
     catch (err) { next(err); }
   }
 }

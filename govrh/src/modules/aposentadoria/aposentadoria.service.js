@@ -2,57 +2,50 @@ const prisma = require('../../config/prisma');
 const { Errors } = require('../../shared/errors/AppError');
 const { anosDeServico } = require('../../shared/utils/date');
 
-// Regras EC 103/2019 — Regras de transição e definitivas (simplificadas)
 const REGRAS_APOSENTADORIA = {
   VOLUNTARIA: {
-    ESTATUTARIO: { idadeMin: 62, tempoServicoMin: 35, tempoContribuicaoMin: 35 }, // mulher: 57/30/30
+    ESTATUTARIO: { idadeMin: 62, tempoServicoMin: 35 },
     CELETISTA:   { idadeMin: 65, tempoServicoMin: 20 },
   },
-  COMPULSORIA: { idadeMin: 75 }, // Todos os regimes — art. 40 §1º II CF
-  ESPECIAL_PROFESSOR: { idadeMin: 57, tempoServicoMin: 30, tempoContribuicaoMin: 30 }, // magistério
+  COMPULSORIA:        { idadeMin: 75 },
+  ESPECIAL_PROFESSOR: { idadeMin: 57, tempoServicoMin: 30 },
 };
 
 class AposentadoriaService {
 
   async simular(tenantId, servidorId) {
     const srv = await this._findServidor(tenantId, servidorId);
-    const anos = anosDeServico(srv.dataAdmissao);
-    const idadeAtual = this._calcularIdade(srv.dataNascimento);
-    const vencBase = Number(srv.nivelSalarial?.vencimentoBase || 0);
+    const vinculo = srv.vinculos[0];
 
-    // Regras para estatutário (simplificado — regra definitiva EC 103)
-    const regra = REGRAS_APOSENTADORIA.VOLUNTARIA[srv.regimeJuridico] || REGRAS_APOSENTADORIA.VOLUNTARIA.CELETISTA;
-    const regraEspecial = REGRAS_APOSENTADORIA.ESPECIAL_PROFESSOR;
+    const anos        = anosDeServico(vinculo.dataAdmissao);
+    const idadeAtual  = this._calcularIdade(srv.dataNascimento);
+    const vencBase    = Number(vinculo.nivelSalarial?.vencimentoBase || 0);
+    const regime      = vinculo.regimeJuridico;
+
+    const regra           = REGRAS_APOSENTADORIA.VOLUNTARIA[regime] || REGRAS_APOSENTADORIA.VOLUNTARIA.CELETISTA;
+    const regraEspecial   = REGRAS_APOSENTADORIA.ESPECIAL_PROFESSOR;
     const regraCompulsoria = REGRAS_APOSENTADORIA.COMPULSORIA;
 
-    // Voluntária
-    const faltaIdade    = Math.max(0, regra.idadeMin - idadeAtual);
-    const faltaServico  = Math.max(0, (regra.tempoServicoMin || 35) - anos);
+    const faltaIdade   = Math.max(0, regra.idadeMin - idadeAtual);
+    const faltaServico = Math.max(0, (regra.tempoServicoMin || 35) - anos);
     const aptaVoluntaria = faltaIdade === 0 && faltaServico === 0;
 
-    // Especial professor
     const faltaIdadeProf   = Math.max(0, regraEspecial.idadeMin - idadeAtual);
     const faltaServicoProf = Math.max(0, regraEspecial.tempoServicoMin - anos);
     const aptaEspecial = faltaIdadeProf === 0 && faltaServicoProf === 0;
 
-    // Compulsória
     const faltaCompulsoria = Math.max(0, regraCompulsoria.idadeMin - idadeAtual);
 
-    // Cálculo simplificado do benefício (média das últimas remunerações)
-    const beneficioEstimado = aptaVoluntaria
-      ? vencBase // Na regra definitiva EC103: média 100% das contribuições — simplificamos como vencimento base
-      : null;
-
     return {
-      servidor: { id: srv.id, matricula: srv.matricula, nome: srv.nome, regime: srv.regimeJuridico },
+      servidor: { id: srv.id, matricula: srv.matricula, nome: srv.nome, regime },
       situacaoAtual: { idadeAtual, anosServico: anos, vencimentoBase: vencBase },
       aposentadoriaVoluntaria: {
         apta: aptaVoluntaria,
         faltaIdade, faltaServico,
-        idadeMinima: regra.idadeMin,
+        idadeMinima:        regra.idadeMin,
         tempoServicoMinimo: regra.tempoServicoMin,
-        beneficioEstimado,
-        dataEstimada: aptaVoluntaria ? null : this._calcularDataEstimada(srv, regra),
+        beneficioEstimado:  aptaVoluntaria ? vencBase : null,
+        dataEstimada:       aptaVoluntaria ? null : this._calcularDataEstimada(vinculo.dataAdmissao, srv.dataNascimento, regra),
       },
       aposentadoriaEspecialProfessor: {
         apta: aptaEspecial,
@@ -60,37 +53,11 @@ class AposentadoriaService {
         obs: 'Válido apenas para professores com exercício exclusivo em sala de aula.',
       },
       aposentadoriaCompulsoria: {
-        faltaAnos: faltaCompulsoria,
-        idadeLimite: regraCompulsoria.idadeMin,
+        faltaAnos:    faltaCompulsoria,
+        idadeLimite:  regraCompulsoria.idadeMin,
         dataEstimada: this._projetarData(srv.dataNascimento, regraCompulsoria.idadeMin),
       },
     };
-  }
-
-  _calcularIdade(dataNascimento) {
-    if (!dataNascimento) return 0;
-    const hoje = new Date();
-    const nasc = new Date(dataNascimento);
-    let idade = hoje.getFullYear() - nasc.getFullYear();
-    if (hoje < new Date(hoje.getFullYear(), nasc.getMonth(), nasc.getDate())) idade--;
-    return idade;
-  }
-
-  _projetarData(dataNascimento, idadeAlvo) {
-    if (!dataNascimento) return null;
-    const nasc = new Date(dataNascimento);
-    return new Date(nasc.getFullYear() + idadeAlvo, nasc.getMonth(), nasc.getDate());
-  }
-
-  _calcularDataEstimada(srv, regra) {
-    const anos = anosDeServico(srv.dataAdmissao);
-    const idadeAtual = this._calcularIdade(srv.dataNascimento);
-    const anosParaServico = Math.max(0, (regra.tempoServicoMin || 35) - anos);
-    const anosParaIdade   = Math.max(0, regra.idadeMin - idadeAtual);
-    const anosEspera = Math.max(anosParaServico, anosParaIdade);
-    const data = new Date();
-    data.setFullYear(data.getFullYear() + anosEspera);
-    return data;
   }
 
   async listar(tenantId, query = {}, skip = 0, take = 20) {
@@ -103,7 +70,17 @@ class AposentadoriaService {
         where, skip, take,
         orderBy: { createdAt: 'desc' },
         include: {
-          servidor: { select: { matricula: true, nome: true, cargo: { select: { nome: true } } } },
+          servidor: {
+            select: {
+              matricula: true,
+              nome: true,
+              vinculos: {
+                where: { atual: true },
+                take: 1,
+                select: { cargo: { select: { nome: true } } },
+              },
+            },
+          },
         },
       }),
       prisma.aposentadoria.count({ where }),
@@ -113,7 +90,8 @@ class AposentadoriaService {
 
   async pedido(tenantId, { servidorId, tipo, dataRequerimento, observacao }) {
     const srv = await this._findServidor(tenantId, servidorId);
-    if (srv.situacaoFuncional !== 'ATIVO') throw Errors.SERVIDOR_INATIVO();
+    const vinculo = srv.vinculos[0];
+    if (vinculo.situacaoFuncional !== 'ATIVO') throw Errors.SERVIDOR_INATIVO();
 
     const existente = await prisma.aposentadoria.findFirst({
       where: { servidorId, status: { in: ['REQUERIDA', 'EM_ANALISE'] } },
@@ -136,8 +114,20 @@ class AposentadoriaService {
       where: { id, tenantId },
       include: {
         servidor: {
-          select: { matricula: true, nome: true, dataNascimento: true, dataAdmissao: true,
-            cargo: { select: { nome: true } }, nivelSalarial: { select: { vencimentoBase: true } } },
+          select: {
+            matricula: true,
+            nome: true,
+            dataNascimento: true,
+            vinculos: {
+              where: { atual: true },
+              take: 1,
+              select: {
+                dataAdmissao: true,
+                cargo:        { select: { nome: true } },
+                nivelSalarial: { select: { vencimentoBase: true } },
+              },
+            },
+          },
         },
       },
     });
@@ -151,26 +141,34 @@ class AposentadoriaService {
       throw Errors.VALIDATION('Pedido não está em situação que permita concessão.');
     }
 
-    const [aposAtual] = await prisma.$transaction([
+    const vinculo = await prisma.vinculoFuncional.findFirst({
+      where: { servidorId: a.servidorId, atual: true },
+    });
+
+    const ops = [
       prisma.aposentadoria.update({
         where: { id },
         data: { status: 'CONCEDIDA', portaria, dataConcessao: new Date(dataConcessao), valorBeneficio, observacao },
       }),
-      prisma.servidor.update({
-        where: { id: a.servidorId },
-        data: { situacaoFuncional: 'APOSENTADO' },
-      }),
-      prisma.historicoFuncional.create({
-        data: {
-          servidorId: a.servidorId, tenantId,
-          dataAlteracao: new Date(dataConcessao),
-          tipoAlteracao: 'APOSENTADORIA',
-          descricao: `Aposentadoria ${a.tipo} concedida. Portaria: ${portaria}`,
-          situacaoAnterior: 'ATIVO', situacaoNova: 'APOSENTADO',
-        },
-      }),
-    ]);
+    ];
 
+    if (vinculo) {
+      ops.push(
+        prisma.vinculoFuncional.update({
+          where: { id: vinculo.id },
+          data: {
+            situacaoFuncional:  'APOSENTADO',
+            dataEncerramento:   new Date(dataConcessao),
+            motivoEncerramento: `Aposentadoria concedida. Portaria: ${portaria}`,
+            tipoAlteracao:      'APOSENTADORIA',
+            portaria,
+            atual:              false,
+          },
+        })
+      );
+    }
+
+    const [aposAtual] = await prisma.$transaction(ops);
     return aposAtual;
   }
 
@@ -179,19 +177,17 @@ class AposentadoriaService {
     return prisma.aposentadoria.update({ where: { id }, data: { status: 'INDEFERIDA', observacao: motivo } });
   }
 
-  // ── Pensão por Morte ────────────────────────────────────────
-
   async pensionistas(tenantId, query = {}, skip = 0, take = 20) {
-    const where = { tenantId, ativa: true };
     const [dados, total] = await prisma.$transaction([
       prisma.pensao.findMany({
-        where, skip, take,
+        where: { ativa: true, servidorOrigem: { tenantId } },
+        skip, take,
         include: {
           servidorOrigem: { select: { matricula: true, nome: true } },
-          dependente: { select: { nome: true, parentesco: true, cpf: true } },
+          dependente:     { select: { nome: true, grauParentesco: true, cpf: true } },
         },
       }),
-      prisma.pensao.count({ where }),
+      prisma.pensao.count({ where: { ativa: true, servidorOrigem: { tenantId } } }),
     ]);
     return { dados, total };
   }
@@ -203,33 +199,87 @@ class AposentadoriaService {
     const dep = await prisma.dependente.findFirst({ where: { id: dependenteId, servidorId: servidorOrigemId } });
     if (!dep) throw Errors.NOT_FOUND('Dependente');
 
-    // Marca servidor como falecido
-    if (srv.situacaoFuncional !== 'FALECIDO') {
-      await prisma.servidor.update({ where: { id: servidorOrigemId }, data: { situacaoFuncional: 'FALECIDO' } });
+    const vinculo = await prisma.vinculoFuncional.findFirst({
+      where: { servidorId: servidorOrigemId, atual: true },
+    });
+
+    const ops = [];
+
+    if (vinculo && vinculo.situacaoFuncional !== 'FALECIDO') {
+      ops.push(
+        prisma.vinculoFuncional.update({
+          where: { id: vinculo.id },
+          data: {
+            situacaoFuncional:  'FALECIDO',
+            tipoAlteracao:      'FALECIMENTO',
+            dataEncerramento:   new Date(dataInicio),
+            atual:              false,
+          },
+        })
+      );
     }
 
-    return prisma.pensao.create({
-      data: {
-        tenantId, servidorOrigemId, dependenteId,
-        dataInicio: new Date(dataInicio),
-        percentual, valorBeneficio, portaria, ativa: true,
-      },
-    });
+    ops.push(
+      prisma.pensao.create({
+        data: {
+          servidorOrigemId, dependenteId,
+          dataInicio:     new Date(dataInicio),
+          percentual, valorBeneficio, portaria, ativa: true,
+        },
+      })
+    );
+
+    const results = await prisma.$transaction(ops);
+    return results[results.length - 1];
   }
 
   async cessarPensao(tenantId, id, { motivo, dataCessacao }) {
-    const p = await prisma.pensao.findFirst({ where: { id, tenantId } });
+    const p = await prisma.pensao.findFirst({
+      where: { id, servidorOrigem: { tenantId } },
+    });
     if (!p) throw Errors.NOT_FOUND('Pensão');
     return prisma.pensao.update({
       where: { id },
-      data: { ativa: false, dataCessacao: new Date(dataCessacao), motivoCessacao: motivo },
+      data: { ativa: false, dataFim: new Date(dataCessacao), motivoFim: motivo },
     });
+  }
+
+  _calcularIdade(dataNascimento) {
+    if (!dataNascimento) return 0;
+    const hoje = new Date();
+    const nasc = new Date(dataNascimento);
+    let idade = hoje.getFullYear() - nasc.getFullYear();
+    if (hoje < new Date(hoje.getFullYear(), nasc.getMonth(), nasc.getDate())) idade--;
+    return idade;
+  }
+
+  _projetarData(dataNascimento, idadeAlvo) {
+    if (!dataNascimento) return null;
+    const nasc = new Date(dataNascimento);
+    return new Date(nasc.getFullYear() + idadeAlvo, nasc.getMonth(), nasc.getDate());
+  }
+
+  _calcularDataEstimada(dataAdmissao, dataNascimento, regra) {
+    const anos        = anosDeServico(dataAdmissao);
+    const idadeAtual  = this._calcularIdade(dataNascimento);
+    const anosParaServico = Math.max(0, (regra.tempoServicoMin || 35) - anos);
+    const anosParaIdade   = Math.max(0, regra.idadeMin - idadeAtual);
+    const anosEspera = Math.max(anosParaServico, anosParaIdade);
+    const data = new Date();
+    data.setFullYear(data.getFullYear() + anosEspera);
+    return data;
   }
 
   async _findServidor(tenantId, servidorId) {
     const srv = await prisma.servidor.findFirst({
       where: { id: servidorId, tenantId },
-      include: { nivelSalarial: true },
+      include: {
+        vinculos: {
+          where: { atual: true },
+          take: 1,
+          include: { nivelSalarial: true },
+        },
+      },
     });
     if (!srv) throw Errors.NOT_FOUND('Servidor');
     return srv;

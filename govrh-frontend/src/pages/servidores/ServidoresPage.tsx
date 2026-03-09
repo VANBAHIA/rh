@@ -25,7 +25,7 @@ import { toast } from '@/hooks/useToast'
 // MÁSCARA FACIAL SVG
 // ─────────────────────────────────────────────────────────────────────────────
 
-const MASK = { cx: 50, cy: 47, rx: 30, ry: 38 }
+const MASK = { cx: 50, cy: 60, rx: 28, ry: 38 }
 type CaptureStatus = 'idle' | 'live' | 'captured' | 'uploading' | 'success' | 'error'
 
 function FaceMaskSVG({ status }: { status: CaptureStatus }) {
@@ -37,12 +37,12 @@ function FaceMaskSVG({ status }: { status: CaptureStatus }) {
   return (
     <svg
       className="absolute inset-0 w-full h-full pointer-events-none"
-      viewBox="0 0 100 100"
+      viewBox="0 0 100 133"
       preserveAspectRatio="none"
     >
       <defs>
         <mask id="bioMask">
-          <rect width="100" height="100" fill="white" />
+          <rect width="100" height="133" fill="white" />
           <ellipse cx={MASK.cx} cy={MASK.cy} rx={MASK.rx} ry={MASK.ry} fill="black" />
         </mask>
         <filter id="bioGlow">
@@ -55,7 +55,7 @@ function FaceMaskSVG({ status }: { status: CaptureStatus }) {
       </defs>
 
       {/* Escurecer fora da elipse */}
-      <rect width="100" height="100" fill="rgba(0,0,0,0.52)" mask="url(#bioMask)" />
+      <rect width="100" height="133" fill="rgba(0,0,0,0.52)" mask="url(#bioMask)" />
 
       {/* Contorno oval */}
       <ellipse
@@ -113,6 +113,8 @@ function BiometriaFacialModal({ servidor, onClose, onUploaded }: BiometriaFacial
   const streamRef = useRef<MediaStream | null>(null)
 
   const temBiometria = !!servidor.biometriaFacial?.cadastrada
+
+  const handleClose = () => { pararStream(); onClose() }
 
   useEffect(() => {
     iniciarCamera()
@@ -199,7 +201,7 @@ function BiometriaFacialModal({ servidor, onClose, onUploaded }: BiometriaFacial
             <p className="text-gov-100 text-xs mt-0.5 truncate max-w-[220px]">{servidor.nome}</p>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="text-white/70 hover:text-white transition-colors p-1 rounded-lg hover:bg-white/10"
           >
             <X className="w-5 h-5" />
@@ -212,7 +214,7 @@ function BiometriaFacialModal({ servidor, onClose, onUploaded }: BiometriaFacial
         <div className="p-5 space-y-4">
 
           {/* Área câmera / preview */}
-          <div className="relative rounded-xl overflow-hidden bg-gray-900 aspect-video border-2 border-gov-100">
+          <div className="relative rounded-xl overflow-hidden bg-gray-900 border-2 border-gov-100" style={{ height: '320px' }}>
 
             {/* Vídeo */}
             <video
@@ -307,7 +309,7 @@ function BiometriaFacialModal({ servidor, onClose, onUploaded }: BiometriaFacial
                   <Camera className="w-4 h-4 mr-2" />
                   {temBiometria ? 'Capturar nova foto' : 'Capturar foto'}
                 </Button>
-                <Button onClick={onClose} variant="outline" className="border-gray-300 text-gray-600">
+                <Button onClick={handleClose} variant="outline" className="border-gray-300 text-gray-600">
                   Cancelar
                 </Button>
               </>
@@ -338,7 +340,7 @@ function BiometriaFacialModal({ servidor, onClose, onUploaded }: BiometriaFacial
                   <Camera className="w-4 h-4 mr-2" />
                   Tentar novamente
                 </Button>
-                <Button onClick={onClose} variant="outline" className="border-gray-300 text-gray-600">
+                <Button onClick={handleClose} variant="outline" className="border-gray-300 text-gray-600">
                   Cancelar
                 </Button>
               </>

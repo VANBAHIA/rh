@@ -1,12 +1,21 @@
 const prisma = require('../../config/prisma');
 const { Errors } = require('../../shared/errors/AppError');
 
+// ── Helper: converte "HH:mm" em minutos desde meia-noite ─────────
+function toMin(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
 class PontoService {
 
   async listarEscalas(tenantId) {
     return prisma.escalaTrabalho.findMany({
-      where: { OR: [{ tenantId }, { tenantId: null }] },
+      where: { tenantId },
       orderBy: { nome: 'asc' },
+      include: {
+        _count: { select: { servidores: true } },
+      },
     });
   }
 
@@ -25,10 +34,7 @@ class PontoService {
   async atualizarEscala(tenantId, id, dados) {
     const e = await prisma.escalaTrabalho.findUnique({ where: { id } });
     if (!e) throw Errors.NOT_FOUND('Escala');
-    if (e.tenantId !== tenantId) {
-      if (e.tenantId === null) throw Errors.FORBIDDEN('Escala de sistema não pode ser alterada.');
-      throw Errors.NOT_FOUND('Escala');
-    }
+    if (e.tenantId !== tenantId) throw Errors.NOT_FOUND('Escala');
     const { turno, ...clean } = dados;
     const escalaDados = {
       ...clean,
@@ -42,10 +48,7 @@ class PontoService {
   async excluirEscala(tenantId, id) {
     const e = await prisma.escalaTrabalho.findUnique({ where: { id } });
     if (!e) throw Errors.NOT_FOUND('Escala');
-    if (e.tenantId !== tenantId) {
-      if (e.tenantId === null) throw Errors.FORBIDDEN('Escala de sistema não pode ser excluída.');
-      throw Errors.NOT_FOUND('Escala');
-    }
+    if (e.tenantId !== tenantId) throw Errors.NOT_FOUND('Escala');
     return prisma.escalaTrabalho.delete({ where: { id } });
   }
 
@@ -54,13 +57,189 @@ class PontoService {
     if (!srv) throw Errors.NOT_FOUND('Servidor');
 
     await prisma.servidorEscala.updateMany({
-      where: { servidorId, ativo: true },
-      data: { ativo: false, dataFim: new Date() },
+      where: { servidorId, ativa: true },
+      data: { ativa: false, dataFim: new Date() },
     });
 
     return prisma.servidorEscala.create({
       data: { servidorId, escalaId, dataInicio: new Date(dataInicio), dataFim: dataFim ? new Date(dataFim) : null },
     });
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // VALIDAR BATIDA
+  // Chamado pelo terminal ANTES de registrar o ponto.
+  // Retorna:
+  //   { permitido: false, motivo, mensagem }  → servidor sem escala no dia
+  //   { permitido: true, tipoBatida, aviso? } → pode registrar (com ou sem aviso)
+  // ─────────────────────────────────────────────────────────────
+  async validarBatida(tenantId, { servidorId, data, hora }) {
+    // 1. Resolve servidor
+    const srv = await prisma.servidor.findFirst({
+      where: {
+        tenantId,
+        OR: [{ id: servidorId }, { matricula: servidorId }],
+      },
+      select: { id: true, nome: true, matricula: true },
+    });
+    if (!srv) throw Errors.NOT_FOUND('Servidor');
+
+    // 2. Busca escala ativa do servidor
+    const vinculo = await prisma.servidorEscala.findFirst({
+      where: { servidorId: srv.id, ativa: true },  // campo correto: ativa
+      include: { escala: true },
+    });
+
+    if (!vinculo || !vinculo.escala) {
+      return {
+        permitido: false,
+        motivo: 'SEM_ESCALA',
+        mensagem:
+          'Você não possui uma escala de trabalho ativa. ' +
+          'Por favor, entre em contato com sua chefia imediata para regularizar sua situação.',
+      };
+    }
+
+    // 3. Verifica se o turno do dia existe na escala
+    const diaSemana = new Date(data + 'T12:00:00').getDay(); // 0=Dom … 6=Sáb
+    const turnos    = Array.isArray(vinculo.escala.turnos) ? vinculo.escala.turnos : [];
+    const turno     = turnos.find(t => t.diaSemana === diaSemana);
+
+    if (!turno || turno.folga) {
+      const diasNomes = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+      return {
+        permitido: false,
+        motivo: 'DIA_NAO_ESCALADO',
+        mensagem:
+          `Você não está escalado para trabalhar nesta ${diasNomes[diaSemana]}. ` +
+          'Caso precise registrar presença, procure sua chefia imediata para solicitar o ajuste manual.',
+      };
+    }
+
+    // 4. Identifica qual batida é (baseado no registro existente do dia)
+    // @db.Date no Prisma armazena como meia-noite UTC → usar range amplo para cobrir qualquer timezone
+    const dataInicioDia = new Date(data + 'T00:00:00.000Z'); // início do dia UTC
+    const dataFimDia    = new Date(data + 'T23:59:59.999Z'); // fim do dia UTC
+
+    console.log('[validarBatida] servidorId recebido:', servidorId);
+    console.log('[validarBatida] srv.id resolvido:', srv.id);
+    console.log('[validarBatida] data param:', data);
+    console.log('[validarBatida] range busca:', dataInicioDia.toISOString(), '→', dataFimDia.toISOString());
+
+    const registroExistente = await prisma.registroPonto.findFirst({
+      where: {
+        servidorId: srv.id,
+        data: { gte: dataInicioDia, lte: dataFimDia },
+      },
+      orderBy: { createdAt: 'desc' }, // pega o mais recente do dia se houver duplicata
+    });
+
+    console.log('[validarBatida] registroExistente:', registroExistente
+      ? {
+          id:            registroExistente.id,
+          data:          registroExistente.data,
+          entrada:       registroExistente.entrada,
+          saidaAlmoco:   registroExistente.saidaAlmoco,
+          retornoAlmoco: registroExistente.retornoAlmoco,
+          saida:         registroExistente.saida,
+        }
+      : null
+    );
+
+    // Determina a próxima batida esperada com base no que já foi registrado
+    // Regra: segue a sequência entrada → saidaAlmoco → retornoAlmoco → saida
+    // Se o turno não tem almoço, pula direto de entrada para saida
+
+    // Jornada encerrada — servidor já registrou a saída do dia
+    if (registroExistente && registroExistente.saida) {
+      const saidaHora = registroExistente.saida.toISOString().split('T')[1].substring(0, 5);
+      return {
+        permitido: false,
+        motivo:    'JORNADA_ENCERRADA',
+        mensagem:
+          `Sua jornada de trabalho já foi encerrada hoje. ` +
+          `A saída foi registrada às ${saidaHora}. ` +
+          'Se precisar de algum ajuste, solicite à sua chefia imediata a correção manual do ponto.',
+      };
+    }
+
+    let tipoBatida;
+
+    if (!registroExistente || !registroExistente.entrada) {
+      tipoBatida = 'entrada';
+    } else if (!registroExistente.saidaAlmoco && turno.almoco) {
+      tipoBatida = 'saidaAlmoco';
+    } else if (registroExistente.saidaAlmoco && !registroExistente.retornoAlmoco && turno.almoco) {
+      tipoBatida = 'retornoAlmoco';
+    } else {
+      tipoBatida = 'saida';
+    }
+
+    console.log('[validarBatida] turno.almoco:', turno.almoco);
+    console.log('[validarBatida] tipoBatida determinado:', tipoBatida);
+
+    // 5. Calcula diferença em minutos entre hora atual e horário esperado
+    const agoraMin = toMin(hora);
+
+    const horariosEsperados = {
+      entrada:       turno.entrada,
+      saidaAlmoco:   turno.almoco?.inicio,
+      retornoAlmoco: turno.almoco?.fim,
+      saida:         turno.saida,
+    };
+
+    const esperadoStr = horariosEsperados[tipoBatida];
+
+    // Avisos configurados na escala (fallback para 10 min)
+    const avisos = (vinculo.escala.avisosBatida && typeof vinculo.escala.avisosBatida === 'object')
+      ? vinculo.escala.avisosBatida
+      : { entrada: 10, saidaAlmoco: 10, retornoAlmoco: 10, saida: 10 };
+
+    const limiarMin = avisos[tipoBatida] ?? 10;
+
+    let aviso = null;
+
+    if (esperadoStr) {
+      const esperadoMin = toMin(esperadoStr);
+      const diffMin     = agoraMin - esperadoMin; // positivo = atraso, negativo = antecipado
+
+      const tipoLabel = {
+        entrada:       'entrada',
+        saidaAlmoco:   'saída para o almoço',
+        retornoAlmoco: 'retorno do almoço',
+        saida:         'saída',
+      }[tipoBatida];
+
+      if (diffMin > limiarMin) {
+        // Atrasado além do limiar
+        aviso = {
+          tipo: 'ATRASO',
+          minutos: diffMin,
+          mensagem:
+            `Seu ponto de ${tipoLabel} está sendo registrado com ${diffMin} minuto${diffMin !== 1 ? 's' : ''} de atraso ` +
+            `em relação ao horário previsto (${esperadoStr}). ` +
+            'Se houver alguma inconsistência, solicite à sua chefia imediata o ajuste manual do ponto.',
+        };
+      } else if (diffMin < -limiarMin) {
+        // Antecipado além do limiar
+        const antMin = Math.abs(diffMin);
+        aviso = {
+          tipo: 'ANTECIPADO',
+          minutos: antMin,
+          mensagem:
+            `Seu ponto de ${tipoLabel} está sendo registrado com ${antMin} minuto${antMin !== 1 ? 's' : ''} de antecedência ` +
+            `em relação ao horário previsto (${esperadoStr}). ` +
+            'Se houver alguma inconsistência, solicite à sua chefia imediata o ajuste manual do ponto.',
+        };
+      }
+    }
+
+    return {
+      permitido:  true,
+      tipoBatida,
+      horarioEsperado: esperadoStr || null,
+      aviso, // null se dentro do limiar
+    };
   }
 
   async espelho(tenantId, servidorId, mes) {
@@ -92,17 +271,17 @@ class PontoService {
     }, { horasTrabalhadas: 0, horasExtras: 0, horasFalta: 0, faltas: 0, faltasJustif: 0 });
 
     const batidas = registros.map(r => ({
-      data:           r.data.toISOString(),
-      entrada:        r.entrada        ? r.entrada.toISOString().split('T')[1].substring(0, 5)        : undefined,
-      saidaAlmoco:    r.saidaAlmoco    ? r.saidaAlmoco.toISOString().split('T')[1].substring(0, 5)    : undefined,
-      retornoAlmoco:  r.retornoAlmoco  ? r.retornoAlmoco.toISOString().split('T')[1].substring(0, 5)  : undefined,
-      saida:          r.saida          ? r.saida.toISOString().split('T')[1].substring(0, 5)          : undefined,
+      data:             r.data.toISOString(),
+      entrada:          r.entrada        ? r.entrada.toISOString().split('T')[1].substring(0, 5)        : undefined,
+      saidaAlmoco:      r.saidaAlmoco    ? r.saidaAlmoco.toISOString().split('T')[1].substring(0, 5)    : undefined,
+      retornoAlmoco:    r.retornoAlmoco  ? r.retornoAlmoco.toISOString().split('T')[1].substring(0, 5)  : undefined,
+      saida:            r.saida          ? r.saida.toISOString().split('T')[1].substring(0, 5)          : undefined,
       horasTrabalhadas: r.horasTrabalhadas ? Number(r.horasTrabalhadas) : undefined,
-      horasDevidas: 0,
-      saldo:        r.horasExtras ? Number(r.horasExtras) : 0,
-      ocorrencias:  r.ocorrencia ? [r.ocorrencia.replace('FALTA_INJUSTIFICADA', 'FALTA').replace('_', ' ')] : [],
-      status:       'APROVADO',
-      observacao:   r.justificativa,
+      horasDevidas:     0,
+      saldo:            r.horasExtras ? Number(r.horasExtras) : 0,
+      ocorrencias:      r.ocorrencia ? [r.ocorrencia.replace('FALTA_INJUSTIFICADA', 'FALTA').replace('_', ' ')] : [],
+      status:           'APROVADO',
+      observacao:       r.justificativa,
     }));
 
     const saldoBanco = totais.horasExtras - totais.horasFalta;
@@ -125,7 +304,6 @@ class PontoService {
   }
 
   async lancar(tenantId, dados) {
-    // Resolve servidor — aceita UUID ou matrícula
     const srv = await prisma.servidor.findFirst({
       where: {
         tenantId,
@@ -134,12 +312,16 @@ class PontoService {
     });
     if (!srv) throw Errors.NOT_FOUND('Servidor');
 
-    // ✅ FIX: sempre usa o UUID real daqui para frente
     const servidorIdReal = srv.id;
 
-    const data    = new Date(dados.data);
-    const entrada = dados.entrada ? new Date(dados.entrada) : null;
-    const saida   = dados.saida   ? new Date(dados.saida)   : null;
+    // Normaliza data para meia-noite UTC — mesmo formato que o Prisma usa em @db.Date
+    const dataStr = typeof dados.data === 'string' ? dados.data.split('T')[0] : new Date(dados.data).toISOString().split('T')[0];
+    const data    = new Date(dataStr + 'T00:00:00.000Z');
+
+    const entrada       = dados.entrada       ? new Date(dados.entrada)       : null;
+    const saida         = dados.saida         ? new Date(dados.saida)         : null;
+    const saidaAlmoco   = dados.saidaAlmoco   ? new Date(dados.saidaAlmoco)   : null;
+    const retornoAlmoco = dados.retornoAlmoco ? new Date(dados.retornoAlmoco) : null;
 
     let horasTrabalhadas = 0;
     let horasExtras      = 0;
@@ -151,7 +333,7 @@ class PontoService {
       horasTrabalhadas   = parseFloat((totalMin / 60).toFixed(2));
 
       const escalaVinc = await prisma.servidorEscala.findFirst({
-        where: { servidorId: servidorIdReal, ativo: true },
+        where: { servidorId: servidorIdReal, ativa: true },
         include: { escala: true },
       });
       if (escalaVinc) {
@@ -162,18 +344,19 @@ class PontoService {
       }
     }
 
-    // ✅ FIX: sem ...dados no create — campos explícitos para não vazar matrícula ou campos inválidos
+    console.log('[lancar] upsert data UTC:', data.toISOString(), '| tipo:', dados.saidaAlmoco ? 'saidaAlmoco' : dados.retornoAlmoco ? 'retornoAlmoco' : dados.saida ? 'saida' : 'entrada');
+
     return prisma.registroPonto.upsert({
       where: {
         servidorId_data: { servidorId: servidorIdReal, data },
       },
       create: {
-        servidorId:    servidorIdReal,
+        servidorId: servidorIdReal,
         data,
         entrada,
         saida,
-        saidaAlmoco:   dados.saidaAlmoco   ? new Date(dados.saidaAlmoco)   : null,
-        retornoAlmoco: dados.retornoAlmoco  ? new Date(dados.retornoAlmoco) : null,
+        saidaAlmoco,
+        retornoAlmoco,
         horasTrabalhadas,
         horasExtras,
         horasFalta,
@@ -182,19 +365,19 @@ class PontoService {
         justificativa: dados.justificativa || null,
       },
       update: {
-        entrada,
-        saida,
-        saidaAlmoco:   dados.saidaAlmoco   ? new Date(dados.saidaAlmoco)   : undefined,
-        retornoAlmoco: dados.retornoAlmoco  ? new Date(dados.retornoAlmoco) : undefined,
+        // Só atualiza campos que vieram no payload — nunca apaga dados existentes com null
+        ...(entrada       !== null && { entrada }),
+        ...(saida         !== null && { saida }),
+        ...(saidaAlmoco   !== null && { saidaAlmoco }),
+        ...(retornoAlmoco !== null && { retornoAlmoco }),
         horasTrabalhadas,
         horasExtras,
         horasFalta,
-        ocorrencia:    dados.ocorrencia || null,
+        ocorrencia: dados.ocorrencia || null,
       },
     });
   }
 
-  // Registra uma batida simples conforme horário atual
   async bater(tenantId, { servidorId, data, hora }) {
     const srv = await prisma.servidor.findFirst({
       where: {
@@ -204,42 +387,43 @@ class PontoService {
     });
     if (!srv) throw Errors.NOT_FOUND('Servidor');
 
-    const dt = new Date(data);
-    if (isNaN(dt)) throw Errors.APP_ERROR('Data inválida');
     const ts = new Date(`${data}T${hora}`);
     if (isNaN(ts)) throw Errors.APP_ERROR('Hora inválida');
 
-    // Busca registro existente usando UUID real
+    // Busca pelo valor exato da data em UTC — mesmo formato do lancar()
+    const dataUTC = new Date(data + 'T00:00:00.000Z');
     const registro = await prisma.registroPonto.findFirst({
-      where: { servidorId: srv.id, data: dt },
+      where: { servidorId: srv.id, data: dataUTC },
     });
+
+    console.log('[bater] buscando registro para', srv.id, 'data UTC:', dataUTC.toISOString(), '| encontrou:', registro ? registro.id : null);
 
     const campos = {};
     let tipoInserido = null;
 
+    // Sequência correta: entrada → saidaAlmoco → retornoAlmoco → saida
     if (!registro || !registro.entrada) {
       campos.entrada = ts;
       tipoInserido   = 'entrada';
-    } else if (!registro.saida) {
-      campos.saida   = ts;
-      campos.entrada = registro.entrada;
-      tipoInserido   = 'saida';
     } else if (!registro.saidaAlmoco) {
       campos.saidaAlmoco = ts;
       campos.entrada     = registro.entrada;
-      campos.saida       = registro.saida;
       tipoInserido       = 'saidaAlmoco';
     } else if (!registro.retornoAlmoco) {
       campos.retornoAlmoco = ts;
       campos.entrada       = registro.entrada;
-      campos.saida         = registro.saida;
       campos.saidaAlmoco   = registro.saidaAlmoco;
       tipoInserido         = 'retornoAlmoco';
+    } else if (!registro.saida) {
+      campos.saida   = ts;
+      campos.entrada = registro.entrada;
+      if (registro.saidaAlmoco)   campos.saidaAlmoco   = registro.saidaAlmoco;
+      if (registro.retornoAlmoco) campos.retornoAlmoco = registro.retornoAlmoco;
+      tipoInserido   = 'saida';
     } else {
       return { registro, tipo: null };
     }
 
-    // ✅ Passa sempre o UUID real para lancar()
     const resultado = await this.lancar(tenantId, { servidorId: srv.id, data, ...campos });
     return { registro: resultado, tipo: tipoInserido };
   }

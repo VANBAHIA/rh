@@ -2,7 +2,6 @@
 const ServidoresService = require('./service');
 const { success, created, paginated, noContent } = require('../../utils/response');
 
-// O service é instanciado por request para receber o db com tenant scope
 const getService = (req) => new ServidoresService(req.db);
 
 const listar = async (req, res) => {
@@ -16,7 +15,7 @@ const buscarPorId = async (req, res) => {
 };
 
 const criar = async (req, res) => {
-  const data = await getService(req).criar(req.body, req.user.id);
+  const data = await getService(req).criar(req.body, req.user.tenantId, req.user.id);
   created(res, data);
 };
 
@@ -62,17 +61,56 @@ const registrarProgressao = async (req, res) => {
   created(res, data);
 };
 
-// Stubs para implementação futura
-const exportar = async (req, res) => success(res, { message: 'Exportação em desenvolvimento.' });
-const buscarDadosBancarios = async (req, res) => success(res, {});
+const buscarDadosBancarios = async (req, res) => {
+  const data = await getService(req).buscarDadosBancarios(req.params.id);
+  success(res, data);
+};
+
+const adicionarDadosBancarios = async (req, res) => {
+  const data = await getService(req).adicionarDadosBancarios(
+    req.params.id, req.body, req.user.id
+  );
+  created(res, data);
+};
+
+const ativarConta = async (req, res) => {
+  const data = await getService(req).ativarConta(
+    req.params.id, req.params.contaId, req.user.id
+  );
+  success(res, data);
+};
+
+// ── Escala de trabalho ────────────────────────────────────────────────────────
+
+const obterEscala = async (req, res) => {
+  const data = await getService(req).obterEscala(req.params.id);
+  success(res, data);
+};
+
+const vincularEscala = async (req, res) => {
+  const data = await getService(req).vincularEscala(req.params.id, req.body, req.user.id);
+  created(res, data);
+};
+
+const historicoEscala = async (req, res) => {
+  const page  = Math.max(1, parseInt(req.query.page)  || 1)
+  const limit = Math.min(50, parseInt(req.query.limit) || 5)
+  const data  = await getService(req).historicoEscala(req.params.id, { page, limit });
+  success(res, data);
+};
+
+// ── Stubs ─────────────────────────────────────────────────────────────────────
+
+const exportar          = async (req, res) => success(res, { message: 'Exportação em desenvolvimento.' });
 const atualizarDadosBancarios = async (req, res) => success(res, {});
-const uploadDocumento = async (req, res) => created(res, {});
-const removerDocumento = async (req, res) => noContent(res);
+const uploadDocumento   = async (req, res) => created(res, {});
+const removerDocumento  = async (req, res) => noContent(res);
 
 module.exports = {
   listar, buscarPorId, criar, atualizar, alterarSituacao, remover,
   historico, extrato, exportar,
   listarDocumentos, uploadDocumento, removerDocumento,
-  buscarDadosBancarios, atualizarDadosBancarios,
+  buscarDadosBancarios, atualizarDadosBancarios, ativarConta,
   listarProgressoes, registrarProgressao,
+  obterEscala, vincularEscala, historicoEscala,
 };
