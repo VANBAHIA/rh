@@ -73,11 +73,10 @@ function useServerStatus(intervalMs = 20000) {
     if (pausedRef.current) return // não verifica enquanto biometria está processando
     const t0 = Date.now()
     try {
-      // Usa /api/v1/ponto/escalas pois /health não existe — qualquer 2xx ou 4xx = servidor respondendo
-      const res = await fetch('/api/v1/ponto/escalas?limit=1', {
+      const res = await fetch('/api/v1/health/time', {
         method: 'GET',
         cache: 'no-store',
-        signal: AbortSignal.timeout(8000), // timeout maior para servidor sob carga
+        signal: AbortSignal.timeout(8000),
       })
       setLatency(Date.now() - t0)
       // 401/403/404/200 = servidor online; só erro de rede = offline

@@ -1,20 +1,31 @@
 const prisma = require('../../config/prisma');
 const { Errors } = require('../../shared/errors/AppError');
 
-// ── Helper: converte "HH:mm" em minutos desde meia-noite ─────────
-// Formata Date como YYYY-MM-DD no timezone LOCAL (evita .toISOString() que retorna UTC)
-function _dataLocal(date) {
-  if (!date) return '';
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+// ── Helpers de timezone ──────────────────────────────────────────
+// O processo roda em TZ=UTC. Datas são gravadas no banco como UTC puro.
+// Para exibição e comparação com horários de escala (que estão em hora de Brasília),
+// deslocamos o Date em -3h usando um offset explícito — sem depender do TZ do SO.
+const BRASIL_OFFSET_MS = -3 * 60 * 60 * 1000; // UTC-3
+
+// Retorna um Date "espelhado" em Brasília — use APENAS para leitura (getUTCHours, etc.)
+// NUNCA grave esse Date no banco — sempre grave o Date UTC original
+function _brDate(date) {
+  if (!date) return null;
+  return new Date(date.getTime() + BRASIL_OFFSET_MS);
 }
 
-// Formata Date como HH:mm no timezone LOCAL do processo (nunca UTC)
+// Formata Date UTC como YYYY-MM-DD no horário de Brasília
+function _dataLocal(date) {
+  if (!date) return '';
+  const d = _brDate(date);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+}
+
+// Formata Date UTC como HH:mm no horário de Brasília
 function _hhmm(date) {
   if (!date) return undefined;
-  return `${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}`;
+  const d = _brDate(date);
+  return `${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}`;
 }
 
 function toMin(hhmm) {
@@ -90,9 +101,11 @@ class PontoService {
   // ─────────────────────────────────────────────────────────────
   async validarBatida(tenantId, { servidorId }) {
     // SEGURANÇA: data e hora sempre do servidor, nunca do cliente
-    const agora = new Date();
-    const data  = `${agora.getFullYear()}-${String(agora.getMonth()+1).padStart(2,'0')}-${String(agora.getDate()).padStart(2,'0')}`;
-    const hora  = `${String(agora.getHours()).padStart(2,'0')}:${String(agora.getMinutes()).padStart(2,'0')}`;
+    // Converte UTC → Brasília para comparação com horários de escala (que estão em hora local)
+    const agora     = new Date();
+    const agoraBR   = _brDate(agora);
+    const data  = `${agoraBR.getUTCFullYear()}-${String(agoraBR.getUTCMonth()+1).padStart(2,'0')}-${String(agoraBR.getUTCDate()).padStart(2,'0')}`;
+    const hora  = `${String(agoraBR.getUTCHours()).padStart(2,'0')}:${String(agoraBR.getUTCMinutes()).padStart(2,'0')}`;
     // 1. Resolve servidor
     const srv = await prisma.servidor.findFirst({
       where: {
@@ -137,9 +150,9 @@ class PontoService {
 
     // 4. Identifica qual batida é (baseado no registro existente do dia)
     // @db.Date no Prisma armazena como meia-noite UTC → usar range amplo para cobrir qualquer timezone
-    // Local midnight — consistente com o que lancar() e bater() gravam
+    // UTC midnight — consistente com o que lancar() grava via Date.UTC()
     const [_vano, _vmes, _vdia] = data.split('-').map(Number);
-    const dataLocalMidnight = new Date(_vano, _vmes - 1, _vdia, 0, 0, 0, 0);
+    const dataLocalMidnight = new Date(Date.UTC(_vano, _vmes - 1, _vdia, 0, 0, 0, 0));
 
     console.log('[validarBatida] srv.id:', srv.id, '| data:', data, '| dataLocal:', dataLocalMidnight);
 
@@ -331,10 +344,11 @@ class PontoService {
 
     const servidorIdReal = srv.id;
 
-    // Data como local midnight — evita o T00:00:00.000Z que desloca para 21h do dia anterior no MySQL UTC-3
+    // Data como UTC midnight — chave do registro no banco
+    // dados.data já vem como string YYYY-MM-DD (data em Brasília) do bater()
     const dataStr = typeof dados.data === 'string' ? dados.data.split('T')[0] : _dataLocal(new Date(dados.data));
     const [_dano, _dmes, _ddia] = dataStr.split('-').map(Number);
-    const data = new Date(_dano, _dmes - 1, _ddia, 0, 0, 0, 0);
+    const data = new Date(Date.UTC(_dano, _dmes - 1, _ddia, 0, 0, 0, 0));
 
     // Timestamps: se vier como Date/objeto já construído (bater()), usa direto
     // Se vier como string ISO, reconstrói como local para não sofrer conversão UTC
@@ -421,17 +435,17 @@ class PontoService {
     if (!srv) throw Errors.NOT_FOUND('Servidor');
 
     // SEGURANÇA: timestamp sempre do servidor — frontend nao envia hora
-    const agora = new Date();
-    const ts    = agora;
-    const data  = `${agora.getFullYear()}-${String(agora.getMonth()+1).padStart(2,'0')}-${String(agora.getDate()).padStart(2,'0')}`;
-    console.log('[DIAG bater] process.env.TZ:', process.env.TZ);
-    console.log('[DIAG bater] ts.toISOString():', ts.toISOString());
-    console.log('[DIAG bater] ts.getHours():', ts.getHours(), '| ts.getMinutes():', ts.getMinutes());
-    console.log('[DIAG bater] data string:', data);
+    // ts = UTC puro → gravado no banco como UTC
+    // data = data em Brasília → usada para agrupar registros do mesmo dia
+    const agora   = new Date();
+    const ts      = agora;
+    const agoraBR = _brDate(agora);
+    const data    = `${agoraBR.getUTCFullYear()}-${String(agoraBR.getUTCMonth()+1).padStart(2,'0')}-${String(agoraBR.getUTCDate()).padStart(2,'0')}`;
+    console.log('[bater] UTC:', ts.toISOString(), '| data BR:', data);
 
-    // Data como local midnight — consistente com o que lancar() grava
+    // UTC midnight — consistente com o que lancar() grava via Date.UTC()
     const [_bano, _bmes, _bdia] = data.split('-').map(Number);
-    const dataLocal = new Date(_bano, _bmes - 1, _bdia, 0, 0, 0, 0);
+    const dataLocal = new Date(Date.UTC(_bano, _bmes - 1, _bdia, 0, 0, 0, 0));
     const registro = await prisma.registroPonto.findFirst({
       where: { servidorId: srv.id, data: dataLocal },
     });
@@ -547,7 +561,7 @@ class PontoService {
     return prisma.bancoHoras.create({
       data: {
         servidorId,
-        data:      (() => { const [_ca, _cm, _cd] = data.split('-').map(Number); return new Date(_ca, _cm-1, _cd, 0,0,0,0); })(),
+        data:      (() => { const [_ca, _cm, _cd] = data.split('-').map(Number); return new Date(Date.UTC(_ca, _cm-1, _cd, 0,0,0,0)); })(),
         tipo:      'DEBITO',
         horas,
         saldo:     novoSaldo,
